@@ -1,0 +1,79 @@
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  extensions = [vector]
+}
+
+// ── Enums ──────────────────────────────────────────────────────────
+
+enum MessageRole {
+  USER
+  ASSISTANT
+}
+
+enum TaskStatus {
+  pending
+  processing
+  done
+  error
+}
+
+// ── Models ─────────────────────────────────────────────────────────
+
+model conversations {
+  id        String     @id @default(cuid())
+  userId    String
+  title     String
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+  messages  messages[]
+}
+
+model messages {
+  id             String        @id @default(cuid())
+  conversationId String
+  conversation   conversations @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  role           MessageRole
+  content        String
+  metadata       Json?
+  createdAt      DateTime      @default(now())
+}
+
+model documents {
+  id          String            @id @default(cuid())
+  userId      String
+  filename    String
+  mimeType    String
+  size        Int
+  filePath    String?
+  storageType String            @default("local")
+  status      String            @default("pending")
+  chunkCount  Int               @default(0)
+  createdAt   DateTime          @default(now())
+  chunks      document_chunks[]
+}
+
+model document_chunks {
+  id         String                 @id @default(cuid())
+  documentId String
+  document   documents              @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  content    String
+  chunkIndex Int
+  embedding  Unsupported("vector")?
+}
+
+model task_events {
+  id        String     @id @default(cuid())
+  userId    String
+  taskType  String
+  taskId    String
+  status    TaskStatus
+  message   String?
+  metadata  Json?
+  createdAt DateTime   @default(now())
+  readAt    DateTime?
+}

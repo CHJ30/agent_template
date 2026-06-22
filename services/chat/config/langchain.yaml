@@ -1,0 +1,10 @@
+# services/chat/config/langchain.yaml
+llm:
+  modelName: gpt-4o-mini
+  temperature: 0.2
+  maxTokens: 1024
+retrieval:
+  topK: 5
+tools: []
+features:
+  streaming: true

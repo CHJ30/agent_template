@@ -1,0 +1,34 @@
+import { Injectable, NotFoundException, ForbiddenException } from '@nestjs/common';
+import { PrismaService } from '../prisma/prisma.service.js';
+
+@Injectable()
+export class ConversationService {
+  constructor(private readonly prisma: PrismaService) {}
+
+  async create(userId: string, title?: string) {
+    return this.prisma.conversations.create({
+      data: { userId, title: title ?? '新对话' },
+    });
+  }
+
+  async findByUser(userId: string) {
+    return this.prisma.conversations.findMany({
+      where: { userId },
+      orderBy: { updatedAt: 'desc' },
+    });
+  }
+
+  async findById(conversationId: string, userId: string) {
+    const conv = await this.prisma.conversations.findUnique({
+      where: { id: conversationId },
+    });
+    if (!conv) throw new NotFoundException('Conversation not found');
+    if (conv.userId !== userId) throw new ForbiddenException('Access denied');
+    return conv;
+  }
+
+  async delete(conversationId: string, userId: string): Promise<void> {
+    await this.findById(conversationId, userId);
+    await this.prisma.conversations.delete({ where: { id: conversationId } });
+  }
+}

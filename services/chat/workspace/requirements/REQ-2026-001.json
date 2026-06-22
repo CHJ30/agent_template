@@ -1,0 +1,16 @@
+{
+  "requirementId": "REQ-2026-001",
+  "title": "用户注册流程优化",
+  "description": "用户注册时必须绑定手机号，密码至少8位",
+  "status": "待分析",
+  "priority": "高",
+  "createdAt": "2026-06-01",
+  "stakeholders": ["产品团队", "安全团队"],
+  "constraints": [
+    "注册时必须绑定手机号",
+    "密码至少8位"
+  ],
+  "entities": ["用户", "手机号", "密码"],
+  "action": "用户注册并绑定手机号",
+  "acceptanceCriteria": []
+}
