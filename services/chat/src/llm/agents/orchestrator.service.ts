@@ -2,14 +2,16 @@ import { Injectable, Inject } from '@nestjs/common';
 import { ChatOpenAI } from '@langchain/openai';
 import { LLM_CONFIG } from '../llm.constants.js';
 import type { LlmConfig } from '../model.factory.js';
+import { HumanMessage } from '@langchain/core/messages';
 import { createChatModel } from '../model.factory.js';
+import { runAnalysisGraph, keywordClassify } from '../graph/requirement-analysis-graph.js';
+import { TEST_CASES, runTestCase } from '../graph/test-graph.js';
+import type { TestCaseResult } from '../graph/test-graph.js';
 import {
-  createExtractAgent,
-  createClarifyAgent,
-  createAnalysisAgent,
-  createRiskAgent,
-  createSummaryAgent,
-} from './sub-agents.js';
+  ANALYSIS_TEST_CASES,
+  runAnalysisTestCase,
+} from '../graph/analysis-test-cases.js';
+import type { AnalysisTestResult } from '../graph/analysis-test-cases.js';
 
 export interface OrchestratorStep {
   agent: string;
@@ -20,12 +22,20 @@ export interface OrchestratorStep {
 export interface OrchestratorResult {
   mode: 'fixed';
   status: 'completed' | 'needs_clarification' | 'failed';
+  intent?: 'analyze' | 'query' | 'chat';
+  reportId?: string;
   clarificationQuestions?: string[];
   usedAgents: string[];
   fallback?: 'manual_review';
   steps: OrchestratorStep[];
   report?: string;
+  queryResponse?: string;
+  chatResponse?: string;
+  nodeErrors?: string[];
 }
+
+export { TEST_CASES, ANALYSIS_TEST_CASES };
+export type { TestCaseResult, AnalysisTestResult };
 
 function parseJson(text: string): any {
   const cleaned = text.replace(/^```(?:json)?\n?/m, '').replace(/\n?```$/m, '').trim();
@@ -51,29 +61,60 @@ export class OrchestratorService {
   async orchestrate(input: string, skipClarification = false): Promise<OrchestratorResult> {
     const steps: OrchestratorStep[] = [];
     const usedAgents: string[] = [];
+    // Keyword-based fallback intent — used when the graph throws before returning state.
+    let fallbackIntent: 'analyze' | 'query' | 'chat' = keywordClassify(input);
 
     try {
-      // ── Step 1: 需求抽取 ────────────────────────────────────────
-      const extractOutput = await createExtractAgent(this.model).invoke({ input });
-      steps.push({ agent: 'extractAgent', parallel: false, output: extractOutput });
+      const state = await runAnalysisGraph(this.model, input, skipClarification);
+      fallbackIntent = state.intent;
+
+      steps.push({ agent: 'classifierAgent', parallel: false, output: state.intent });
+      usedAgents.push('classifierAgent');
+
+      // ── query path ─────────────────────────────────────────────────────────
+      if (state.intent === 'query') {
+        steps.push({ agent: 'queryHandlerAgent', parallel: false, output: state.queryResponse });
+        usedAgents.push('queryHandlerAgent');
+        return {
+          mode: 'fixed',
+          status: 'completed',
+          intent: 'query',
+          usedAgents,
+          steps,
+          report: state.queryResponse,
+          queryResponse: state.queryResponse,
+        };
+      }
+
+      // ── chat path ──────────────────────────────────────────────────────────
+      if (state.intent === 'chat') {
+        steps.push({ agent: 'chatHandlerAgent', parallel: false, output: state.chatResponse });
+        usedAgents.push('chatHandlerAgent');
+        return {
+          mode: 'fixed',
+          status: 'completed',
+          intent: 'chat',
+          usedAgents,
+          steps,
+          report: state.chatResponse,
+          chatResponse: state.chatResponse,
+        };
+      }
+
+      // ── analyze path ───────────────────────────────────────────────────────
+      steps.push({ agent: 'extractAgent', parallel: false, output: state.extracted });
       usedAgents.push('extractAgent');
 
-      const extracted = parseJson(extractOutput);
-      const extractedStr = extracted ? JSON.stringify(extracted, null, 2) : extractOutput;
-
-      // ── Step 2: 澄清判断（已完成一轮澄清时跳过）────────────────
       if (!skipClarification) {
-        const clarifyOutput = await createClarifyAgent(this.model).invoke({
-          extractedRequirement: extractedStr,
-        });
-        steps.push({ agent: 'clarifyAgent', parallel: false, output: clarifyOutput });
+        steps.push({ agent: 'clarifyAgent', parallel: false, output: state.clarified });
         usedAgents.push('clarifyAgent');
 
-        const clarify = parseJson(clarifyOutput);
+        const clarify = parseJson(state.clarified);
         if (clarify?.needsClarification === true) {
           return {
             mode: 'fixed',
             status: 'needs_clarification',
+            intent: 'analyze',
             clarificationQuestions: clarify.questions ?? [],
             usedAgents,
             steps,
@@ -81,39 +122,55 @@ export class OrchestratorService {
         }
       }
 
-      // ── Step 3: 并行 — 需求分析 + 风险识别 ─────────────────────
-      const [analysisOutput, riskOutput] = await Promise.all([
-        createAnalysisAgent(this.model).invoke({ extractedRequirement: extractedStr }),
-        createRiskAgent(this.model).invoke({ extractedRequirement: extractedStr }),
-      ]);
-      steps.push({ agent: 'analysisAgent', parallel: true, output: analysisOutput });
-      steps.push({ agent: 'riskAgent', parallel: true, output: riskOutput });
+      steps.push({ agent: 'analysisAgent', parallel: true, output: state.analysisResult });
+      steps.push({ agent: 'riskAgent',     parallel: true, output: state.risk });
       usedAgents.push('analysisAgent', 'riskAgent');
 
-      // ── Step 4: 汇总报告 ────────────────────────────────────────
-      const report = await createSummaryAgent(this.model).invoke({
-        extractedRequirement: extractedStr,
-        analysisResult: analysisOutput,
-        riskResult: riskOutput,
-      });
-      steps.push({ agent: 'summaryAgent', parallel: false, output: report });
+      steps.push({ agent: 'summaryAgent', parallel: false, output: state.summary });
       usedAgents.push('summaryAgent');
 
+      const hasNodeErrors = state.nodeErrors && state.nodeErrors.length > 0;
+      const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+      const seq = String(Math.floor(Math.random() * 900) + 100);
+      const reportId = `REQ-${dateStr}-${seq}`;
       return {
         mode: 'fixed',
-        status: 'completed',
+        status: hasNodeErrors ? 'failed' : 'completed',
+        intent: 'analyze',
+        reportId,
         usedAgents,
         steps,
-        report,
+        report: state.summary || undefined,
+        nodeErrors: hasNodeErrors ? state.nodeErrors : undefined,
       };
     } catch {
       return {
         mode: 'fixed',
         status: 'failed',
+        intent: fallbackIntent,
         usedAgents,
         fallback: 'manual_review',
         steps,
       };
     }
+  }
+
+  async ping(): Promise<{ ok: boolean; durationMs: number; reply?: string; error?: string }> {
+    const start = Date.now();
+    try {
+      const result = await this.model.invoke([new HumanMessage('你好')]);
+      const reply = typeof result.content === 'string' ? result.content.slice(0, 80) : 'ok';
+      return { ok: true, durationMs: Date.now() - start, reply };
+    } catch (e) {
+      return { ok: false, durationMs: Date.now() - start, error: e instanceof Error ? e.message : String(e) };
+    }
+  }
+
+  runTestCase(caseId: number): Promise<TestCaseResult> {
+    return runTestCase(this.model, caseId);
+  }
+
+  runAnalysisTest(caseId: number): Promise<AnalysisTestResult> {
+    return runAnalysisTestCase(this.model, caseId);
   }
 }

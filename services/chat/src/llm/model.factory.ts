@@ -51,5 +51,10 @@ export function createChatModel(config: LlmConfig): ChatOpenAI {
     maxTokens: config.llm.maxTokens,
     apiKey,
     configuration: baseURL ? { baseURL } : undefined,
+    // Disable LangChain retries — LangGraph's retryPolicy owns retry logic.
+    // With maxRetries > 0, abandoned Promise.all branches trigger setTimeout-based
+    // retries whose rejections have no handler → unhandledRejection.
+    maxRetries: 0,
+    timeout: 300_000,
   });
 }

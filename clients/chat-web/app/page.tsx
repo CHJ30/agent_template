@@ -26,6 +26,19 @@ export default function HomePage() {
       <header className="flex items-center justify-between border-b border-gray-200 bg-white px-6 py-3 shadow-sm">
         <h1 className="text-base font-semibold text-gray-800">需求分析助手</h1>
         <div className="flex items-center gap-3">
+          <a
+            href="/graph-test"
+            className="rounded-lg border border-gray-200 px-3 py-1 text-xs text-gray-500 hover:bg-gray-50 transition-colors"
+          >
+            图谱测试
+          </a>
+          <a
+            href="/analysis-test"
+            className="rounded-lg border border-gray-200 px-3 py-1 text-xs text-gray-500 hover:bg-gray-50 transition-colors"
+          >
+            ReAct 测试
+          </a>
+          <span className="text-gray-200">|</span>
           <span className="text-xs text-gray-500">当前用户：</span>
           {(Object.keys(USERS) as UserKey[]).map((k) => (
             <button

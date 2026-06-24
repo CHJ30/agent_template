@@ -1,5 +1,5 @@
-import { Controller, Post, Body } from '@nestjs/common';
-import { OrchestratorService } from './orchestrator.service.js';
+import { Controller, Post, Body, Get } from '@nestjs/common';
+import { OrchestratorService, TEST_CASES, ANALYSIS_TEST_CASES } from './orchestrator.service.js';
 
 @Controller('api/agents')
 export class AgentsController {
@@ -8,5 +8,48 @@ export class AgentsController {
   @Post('orchestrate')
   orchestrate(@Body() body: { input: string; skipClarification?: boolean }) {
     return this.orchestratorService.orchestrate(body.input, body.skipClarification ?? false);
+  }
+
+  /** Minimal LLM call to verify the API key and proxy are reachable. */
+  @Get('ping')
+  ping() {
+    return this.orchestratorService.ping();
+  }
+
+  /** Returns test-case metadata (no LLM calls) — used by the frontend to render cards. */
+  @Get('graph-test/cases')
+  getTestCases() {
+    return TEST_CASES.map(({ id, description, input, expectedIntent, acceptableIntents, maxDurationMs }) => ({
+      id,
+      description,
+      input,
+      expectedIntent,
+      acceptableIntents,
+      maxDurationMs,
+    }));
+  }
+
+  /** Runs a single test case and returns the result. */
+  @Post('graph-test')
+  runTestCase(@Body() body: { caseId: number }) {
+    return this.orchestratorService.runTestCase(body.caseId);
+  }
+
+  /** Returns analysis sub-graph test-case metadata (no LLM calls). */
+  @Get('analysis-test/cases')
+  getAnalysisTestCases() {
+    return ANALYSIS_TEST_CASES.map(({ id, description, input, expectsToolCalls, expectedTools }) => ({
+      id,
+      description,
+      input,
+      expectsToolCalls,
+      expectedTools,
+    }));
+  }
+
+  /** Runs a single analysis sub-graph test case and returns the result. */
+  @Post('analysis-test')
+  runAnalysisTest(@Body() body: { caseId: number }) {
+    return this.orchestratorService.runAnalysisTest(body.caseId);
   }
 }
