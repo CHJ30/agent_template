@@ -12,6 +12,11 @@ import {
   runAnalysisTestCase,
 } from '../graph/analysis-test-cases.js';
 import type { AnalysisTestResult } from '../graph/analysis-test-cases.js';
+import {
+  SUPERVISOR_TEST_CASES,
+  runSupervisorTestCase,
+} from '../graph/supervisor-test-cases.js';
+import type { SupervisorTestResult } from '../graph/supervisor-test-cases.js';
 
 export interface OrchestratorStep {
   agent: string;
@@ -34,8 +39,8 @@ export interface OrchestratorResult {
   nodeErrors?: string[];
 }
 
-export { TEST_CASES, ANALYSIS_TEST_CASES };
-export type { TestCaseResult, AnalysisTestResult };
+export { TEST_CASES, ANALYSIS_TEST_CASES, SUPERVISOR_TEST_CASES };
+export type { TestCaseResult, AnalysisTestResult, SupervisorTestResult };
 
 function parseJson(text: string): any {
   const cleaned = text.replace(/^```(?:json)?\n?/m, '').replace(/\n?```$/m, '').trim();
@@ -157,13 +162,21 @@ export class OrchestratorService {
 
   async ping(): Promise<{ ok: boolean; durationMs: number; reply?: string; error?: string }> {
     const start = Date.now();
-    try {
-      const result = await this.model.invoke([new HumanMessage('你好')]);
-      const reply = typeof result.content === 'string' ? result.content.slice(0, 80) : 'ok';
-      return { ok: true, durationMs: Date.now() - start, reply };
-    } catch (e) {
-      return { ok: false, durationMs: Date.now() - start, error: e instanceof Error ? e.message : String(e) };
+    let lastErr: unknown;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        const result = await this.model.invoke([new HumanMessage('你好')]);
+        const reply = typeof result.content === 'string' ? result.content.slice(0, 80) : 'ok';
+        return { ok: true, durationMs: Date.now() - start, reply };
+      } catch (e) {
+        lastErr = e;
+        if (attempt === 1) {
+          console.log(`[ping] attempt 1 failed (${e instanceof Error ? e.message : e}), retrying in 2s…`);
+          await new Promise(r => setTimeout(r, 2000));
+        }
+      }
     }
+    return { ok: false, durationMs: Date.now() - start, error: lastErr instanceof Error ? lastErr.message : String(lastErr) };
   }
 
   runTestCase(caseId: number): Promise<TestCaseResult> {
@@ -172,5 +185,9 @@ export class OrchestratorService {
 
   runAnalysisTest(caseId: number): Promise<AnalysisTestResult> {
     return runAnalysisTestCase(this.model, caseId);
+  }
+
+  runSupervisorTest(caseId: number): Promise<SupervisorTestResult> {
+    return runSupervisorTestCase(this.model, caseId);
   }
 }

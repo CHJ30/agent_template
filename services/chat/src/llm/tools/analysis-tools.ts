@@ -106,4 +106,89 @@ export const checkConflictsTool = tool(
   },
 );
 
+// ─── load_perf_baseline ───────────────────────────────────────────────────────
+
+const PERF_BASELINES: Record<string, object> = {
+  '批量导入': { p99ResponseMs: 5000,  maxConcurrentOps: 5,      dataVolumeMB: 2048 },
+  '导出':     { p99ResponseMs: 3000,  maxConcurrentOps: 50,     dataVolumeMB: 512  },
+  '查询':     { p99ResponseMs: 100,   maxConcurrentOps: 5000,   dataVolumeMB: 1    },
+  '支付':     { p99ResponseMs: 200,   maxConcurrentOps: 10000,  dataVolumeMB: 0.5  },
+  '文件上传': { p99ResponseMs: 10000, maxConcurrentOps: 100,    dataVolumeMB: 1024 },
+};
+
+export const loadPerfBaselineTool = tool(
+  async ({ scenario }: { scenario: string }) => {
+    const match = Object.keys(PERF_BASELINES).find(k => scenario.includes(k));
+    return JSON.stringify({
+      scenario,
+      baseline: match ? PERF_BASELINES[match] : { p99ResponseMs: 200, maxConcurrentOps: 1000, dataVolumeMB: 10 },
+      note: match ? '基于历史数据' : '采用默认基线（未找到匹配场景）',
+      measuredAt: '2024-06-01',
+    });
+  },
+  {
+    name: 'load_perf_baseline',
+    description: '加载指定业务场景的历史性能基线数据（P99 响应时间、最大并发量、数据规模），用于评估当前需求的性能复杂度。',
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    schema: z.object({ scenario: z.string().describe('业务场景名称，如"批量导入"、"数据导出"、"实时查询"') }) as any,
+  },
+);
+
+// ─── check_perf_budget ────────────────────────────────────────────────────────
+
+export const checkPerfBudgetTool = tool(
+  async ({ concurrentOps, responseMsP99, dataVolumeMB }: {
+    concurrentOps?: number;
+    responseMsP99?: number;
+    dataVolumeMB?: number;
+  }) => {
+    const budget = { maxConcurrentOps: 20_000, maxResponseMsP99: 500, maxSingleOpVolumeMB: 10_240 };
+    const violations: string[] = [];
+    if (concurrentOps  && concurrentOps  > budget.maxConcurrentOps)
+      violations.push(`并发量 ${concurrentOps} 超出预算 ${budget.maxConcurrentOps}`);
+    if (responseMsP99  && responseMsP99  > budget.maxResponseMsP99)
+      violations.push(`P99 响应时间 ${responseMsP99}ms 超出预算 ${budget.maxResponseMsP99}ms`);
+    if (dataVolumeMB   && dataVolumeMB   > budget.maxSingleOpVolumeMB)
+      violations.push(`单次数据量 ${dataVolumeMB}MB 超出预算 ${budget.maxSingleOpVolumeMB}MB`);
+    return JSON.stringify({ withinBudget: violations.length === 0, violations, budget });
+  },
+  {
+    name: 'check_perf_budget',
+    description: '检查需求的性能指标（并发量、响应时间、单次数据量）是否在系统性能预算限额内，返回是否超标及具体项。',
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    schema: z.object({
+      concurrentOps: z.number().optional().describe('预计最大并发操作数'),
+      responseMsP99: z.number().optional().describe('要求的 P99 响应时间（毫秒）'),
+      dataVolumeMB:  z.number().optional().describe('单次操作数据量（MB）'),
+    }) as any,
+  },
+);
+
+// ─── check_security_policy ────────────────────────────────────────────────────
+
+export const checkSecurityPolicyTool = tool(
+  async ({ reqDescription }: { reqDescription: string }) => {
+    const policies: object[] = [];
+    if (/密码|password|口令/i.test(reqDescription))
+      policies.push({ id: 'PWD-001', rule: '密码强度 ≥8 位，含大小写+数字+特殊字符', status: 'required' });
+    if (/个人信息|手机号|身份证|姓名|住址|邮箱/i.test(reqDescription))
+      policies.push({ id: 'DATA-003', rule: '个人信息须加密存储，传输使用 TLS 1.2+', status: 'required' });
+    if (/导出|export|下载|download/i.test(reqDescription))
+      policies.push({ id: 'SEC-007', rule: '数据导出须审批流程 + 完整操作日志', status: 'required' });
+    if (/支付|转账|汇款|清算|银行卡/i.test(reqDescription))
+      policies.push({ id: 'FIN-002', rule: '支付操作须双因子认证 + 实时风控拦截', status: 'required' });
+    if (/上传|附件|文件/i.test(reqDescription))
+      policies.push({ id: 'SEC-012', rule: '文件上传须格式白名单 + 病毒扫描', status: 'recommended' });
+    if (/认证|鉴权|token|jwt/i.test(reqDescription))
+      policies.push({ id: 'AUTH-005', rule: 'Token 有效期 ≤24h，刷新 token 须轮换', status: 'required' });
+    return JSON.stringify({ applicablePolicies: policies, policyCount: policies.length });
+  },
+  {
+    name: 'check_security_policy',
+    description: '根据需求描述检查适用的安全策略（密码策略、数据加密、导出审计、支付风控、认证 token 等）。',
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    schema: z.object({ reqDescription: z.string().describe('需求描述文本') }) as any,
+  },
+);
+
 export const analysisTools = [searchRequirementTool, checkConflictsTool];

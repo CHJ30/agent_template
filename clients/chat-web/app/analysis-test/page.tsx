@@ -15,7 +15,7 @@ function PingButton() {
     setState("checking");
     setInfo(null);
     try {
-      const res = await fetch(`${BACKEND}/api/agents/ping`, { signal: AbortSignal.timeout(30_000) });
+      const res = await fetch(`${BACKEND}/api/agents/ping`, { signal: AbortSignal.timeout(90_000) });
       const data = await res.json();
       setState(data.ok ? "ok" : "fail");
       setInfo(data);

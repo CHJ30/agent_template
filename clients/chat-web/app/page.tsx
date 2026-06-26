@@ -38,6 +38,12 @@ export default function HomePage() {
           >
             ReAct 测试
           </a>
+          <a
+            href="/supervisor-test"
+            className="rounded-lg border border-gray-200 px-3 py-1 text-xs text-gray-500 hover:bg-gray-50 transition-colors"
+          >
+            Supervisor 测试
+          </a>
           <span className="text-gray-200">|</span>
           <span className="text-xs text-gray-500">当前用户：</span>
           {(Object.keys(USERS) as UserKey[]).map((k) => (

@@ -1,5 +1,5 @@
 import { Controller, Post, Body, Get } from '@nestjs/common';
-import { OrchestratorService, TEST_CASES, ANALYSIS_TEST_CASES } from './orchestrator.service.js';
+import { OrchestratorService, TEST_CASES, ANALYSIS_TEST_CASES, SUPERVISOR_TEST_CASES } from './orchestrator.service.js';
 
 @Controller('api/agents')
 export class AgentsController {
@@ -51,5 +51,19 @@ export class AgentsController {
   @Post('analysis-test')
   runAnalysisTest(@Body() body: { caseId: number }) {
     return this.orchestratorService.runAnalysisTest(body.caseId);
+  }
+
+  /** Returns supervisor test-case metadata (no LLM calls). */
+  @Get('supervisor-test/cases')
+  getSupervisorTestCases() {
+    return SUPERVISOR_TEST_CASES.map(({ id, description, input, expectedExperts }) => ({
+      id, description, input, expectedExperts,
+    }));
+  }
+
+  /** Runs a single supervisor + multi-expert test case. */
+  @Post('supervisor-test')
+  runSupervisorTest(@Body() body: { caseId: number }) {
+    return this.orchestratorService.runSupervisorTest(body.caseId);
   }
 }

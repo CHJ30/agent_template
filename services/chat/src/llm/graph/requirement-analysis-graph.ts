@@ -8,6 +8,7 @@ import {
   createRiskAgent,
 } from '../agents/sub-agents.js';
 import { createAnalysisSubGraph } from './analysis-sub-graph.js';
+import { createAnalysisSupervisorSubGraph } from './experts.js';
 
 // ─── State ─────────────────────────────────────────────────────────────────────
 
@@ -27,6 +28,12 @@ export const RequirementAnalysisState = Annotation.Root({
   nodeErrors:        Annotation<string[]>({ reducer: (a, b) => [...a, ...(b ?? [])], default: () => [] }),
   critique:          Annotation<string>({ reducer: (_, b) => b, default: () => '' }),
   reviseCount:       Annotation<number>({ reducer: (_, b) => b, default: () => 0  }),
+  // ── 9.2 Supervisor + expert fields (populated when supervisor sub-graph runs) ──
+  activeExperts:       Annotation<string[]>({ reducer: (_, b) => b, default: () => [] }),
+  functionalAnalysis:  Annotation<string>({ reducer: (_, b) => b, default: () => '' }),
+  performanceAnalysis: Annotation<string>({ reducer: (_, b) => b, default: () => '' }),
+  securityAnalysis:    Annotation<string>({ reducer: (_, b) => b, default: () => '' }),
+  complianceAnalysis:  Annotation<string>({ reducer: (_, b) => b, default: () => '' }),
 });
 
 export type RequirementState = typeof RequirementAnalysisState.State;
@@ -282,17 +289,29 @@ function buildNodes(model: ChatOpenAI) {
     }
   };
 
+  // ── 9.2 Supervisor + multi-expert sub-graph (replaces single-agent ReAct) ──
+  // Original single-agent version kept below for reference:
+  //   const subGraph = createAnalysisSubGraph(model);
+  //   subGraph.invoke({ messages: [...], toolLoopCount: 0, analysisResult: '' })
+  const supervisorSubGraph = createAnalysisSupervisorSubGraph(model);
   const analysisNode = async (state: RequirementState): Promise<Partial<RequirementState>> => {
     try {
-      const subGraph = createAnalysisSubGraph(model);
-      const result = await subGraph.invoke({
-        messages:       [new HumanMessage(`分析以下需求：\n${state.extracted}`)],
-        toolLoopCount:  0,
-        analysisResult: '',
+      const result = await supervisorSubGraph.invoke({
+        extracted:           state.extracted,
+        activeExperts:       [],
+        functionalAnalysis:  '',
+        performanceAnalysis: '',
+        securityAnalysis:    '',
+        complianceAnalysis:  '',
+        analysisResult:      '',
       });
       return {
-        analysisResult: result.analysisResult,
-        toolLoopCount:  result.toolLoopCount,
+        analysisResult:      result.analysisResult,
+        activeExperts:       result.activeExperts,
+        functionalAnalysis:  result.functionalAnalysis,
+        performanceAnalysis: result.performanceAnalysis,
+        securityAnalysis:    result.securityAnalysis,
+        complianceAnalysis:  result.complianceAnalysis,
       };
     } catch (e) {
       return {
