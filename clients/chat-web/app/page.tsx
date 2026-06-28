@@ -44,6 +44,12 @@ export default function HomePage() {
           >
             Supervisor 测试
           </a>
+          <a
+            href="/production-test"
+            className="rounded-lg border border-amber-200 px-3 py-1 text-xs text-amber-600 hover:bg-amber-50 transition-colors"
+          >
+            生产加固
+          </a>
           <span className="text-gray-200">|</span>
           <span className="text-xs text-gray-500">当前用户：</span>
           {(Object.keys(USERS) as UserKey[]).map((k) => (

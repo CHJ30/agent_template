@@ -54,12 +54,13 @@ export function createExpertSubGraph(
   model: ChatOpenAI,
   tools: ExpertTool[],
   systemPrompt: string,
+  name: string,
 ) {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const agentModel = (model as any).bindTools(tools);
   const rawToolNode = new ToolNode(tools);
 
-  // ── agentNode (with one automatic retry for proxy cold-start) ──────────────
+  // ── agentNode: 2 attempts; after final failure, degrade gracefully ─────────
   const agentNode = async (
     state: ExpertSubStateType,
   ): Promise<Partial<ExpertSubStateType>> => {
@@ -73,13 +74,22 @@ export function createExpertSubGraph(
         lastErr = e;
         if (attempt === 1) {
           console.log(
-            `[expert-subgraph] attempt 1 failed (${e instanceof Error ? e.message : e}), retrying in 2s…`,
+            `[expert-subgraph:${name}] attempt 1 failed (${e instanceof Error ? e.message : e}), retrying in 2s…`,
           );
           await new Promise(r => setTimeout(r, 2000));
         }
       }
     }
-    throw lastErr;
+    // Both attempts failed → synthetic degradation message so graph can finish.
+    const errMsg = lastErr instanceof Error ? lastErr.message : String(lastErr);
+    console.log(`[expert-subgraph:${name}] 两次尝试均失败，降级输出`);
+    return {
+      messages: [
+        new AIMessage(
+          `[${name} 专家暂不可用：${errMsg}] 本项分析已跳过，建议人工补充。`,
+        ),
+      ],
+    };
   };
 
   // ── toolsNode ─────────────────────────────────────────────────────────────
@@ -238,6 +248,7 @@ export function createFunctionalExpert(model: ChatOpenAI) {
     model,
     [searchRequirementTool, checkConflictsTool],
     FUNCTIONAL_SYSTEM,
+    'functional',
   );
 }
 
@@ -246,6 +257,7 @@ export function createPerformanceExpert(model: ChatOpenAI) {
     model,
     [searchRequirementTool, loadPerfBaselineTool, checkPerfBudgetTool],
     PERFORMANCE_SYSTEM,
+    'performance',
   );
 }
 
@@ -254,11 +266,12 @@ export function createSecurityExpert(model: ChatOpenAI) {
     model,
     [searchRequirementTool, checkConflictsTool, checkSecurityPolicyTool],
     SECURITY_SYSTEM,
+    'security',
   );
 }
 
 export function createComplianceExpert(model: ChatOpenAI) {
-  return createExpertSubGraph(model, [searchRequirementTool], COMPLIANCE_SYSTEM);
+  return createExpertSubGraph(model, [searchRequirementTool], COMPLIANCE_SYSTEM, 'compliance');
 }
 
 // ─── Supervisor schema & prompt ───────────────────────────────────────────────
@@ -267,7 +280,8 @@ const supervisorSchema = z.object({
   activeExperts: z
     .array(z.enum(['functional', 'performance', 'security', 'compliance']))
     .min(1)
-    .describe('需要参与分析的专家列表（至少 1 个，functional 通常必选）'),
+    .max(4)
+    .describe('需要参与分析的专家列表（至少 1 个，最多 4 个，functional 通常必选）'),
   reasoning: z.string().describe('选择这些专家的判断依据'),
 });
 
@@ -331,7 +345,11 @@ export type SupervisorSubStateType = typeof SupervisorSubState.State;
 // Error isolation: each expert node wraps its sub-graph in try-catch so a
 // single expert failure does NOT block the others (9.6.1 error degradation).
 
-export function createAnalysisSupervisorSubGraph(model: ChatOpenAI) {
+export function createAnalysisSupervisorSubGraph(
+  model: ChatOpenAI,
+  opts?: { forceFailExperts?: string[] },
+) {
+  const forceFailExperts = opts?.forceFailExperts ?? [];
   // ── supervisor ───────────────────────────────────────────────────────────
   const supervisorNode = async (
     state: SupervisorSubStateType,
@@ -369,6 +387,14 @@ export function createAnalysisSupervisorSubGraph(model: ChatOpenAI) {
   ): Promise<Partial<SupervisorSubStateType>> => {
     if (!state.activeExperts.includes('functional')) return {};
     const startMs = Date.now();
+    if (forceFailExperts.includes('functional')) {
+      console.log(`[functional-expert] 强制降级测试`);
+      return {
+        functionalAnalysis:  '[functional 专家暂不可用：[TEST] 强制降级测试] 本项分析已跳过，建议人工补充。',
+        functionalToolCalls: [],
+        expertTimings: { functional: { startMs, durationMs: 0, error: true } },
+      };
+    }
     console.log(`[functional-expert] 开始分析… t=${startMs}`);
     try {
       const result = await functionalSubGraph.invoke({
@@ -386,9 +412,10 @@ export function createAnalysisSupervisorSubGraph(model: ChatOpenAI) {
       };
     } catch (e) {
       const durationMs = Date.now() - startMs;
-      console.log(`[functional-expert] 失败 (${durationMs}ms): ${e instanceof Error ? e.message : e}`);
+      const errMsg = e instanceof Error ? e.message : String(e);
+      console.log(`[functional-expert] 失败 (${durationMs}ms): ${errMsg}`);
       return {
-        functionalAnalysis:  `[ERROR] 功能专家分析失败: ${e instanceof Error ? e.message : String(e)}`,
+        functionalAnalysis:  `[functional 专家暂不可用：${errMsg}] 本项分析已跳过，建议人工补充。`,
         functionalToolCalls: [],
         expertTimings: { functional: { startMs, durationMs, error: true } },
       };
@@ -400,6 +427,14 @@ export function createAnalysisSupervisorSubGraph(model: ChatOpenAI) {
   ): Promise<Partial<SupervisorSubStateType>> => {
     if (!state.activeExperts.includes('performance')) return {};
     const startMs = Date.now();
+    if (forceFailExperts.includes('performance')) {
+      console.log(`[performance-expert] 强制降级测试`);
+      return {
+        performanceAnalysis:  '[performance 专家暂不可用：[TEST] 强制降级测试] 本项分析已跳过，建议人工补充。',
+        performanceToolCalls: [],
+        expertTimings: { performance: { startMs, durationMs: 0, error: true } },
+      };
+    }
     console.log(`[performance-expert] 开始分析… t=${startMs}`);
     try {
       const result = await performanceSubGraph.invoke({
@@ -417,9 +452,10 @@ export function createAnalysisSupervisorSubGraph(model: ChatOpenAI) {
       };
     } catch (e) {
       const durationMs = Date.now() - startMs;
-      console.log(`[performance-expert] 失败 (${durationMs}ms): ${e instanceof Error ? e.message : e}`);
+      const errMsg = e instanceof Error ? e.message : String(e);
+      console.log(`[performance-expert] 失败 (${durationMs}ms): ${errMsg}`);
       return {
-        performanceAnalysis:  `[ERROR] 性能专家分析失败: ${e instanceof Error ? e.message : String(e)}`,
+        performanceAnalysis:  `[performance 专家暂不可用：${errMsg}] 本项分析已跳过，建议人工补充。`,
         performanceToolCalls: [],
         expertTimings: { performance: { startMs, durationMs, error: true } },
       };
@@ -431,6 +467,14 @@ export function createAnalysisSupervisorSubGraph(model: ChatOpenAI) {
   ): Promise<Partial<SupervisorSubStateType>> => {
     if (!state.activeExperts.includes('security')) return {};
     const startMs = Date.now();
+    if (forceFailExperts.includes('security')) {
+      console.log(`[security-expert] 强制降级测试`);
+      return {
+        securityAnalysis:  '[security 专家暂不可用：[TEST] 强制降级测试] 本项分析已跳过，建议人工补充。',
+        securityToolCalls: [],
+        expertTimings: { security: { startMs, durationMs: 0, error: true } },
+      };
+    }
     console.log(`[security-expert] 开始分析… t=${startMs}`);
     try {
       const result = await securitySubGraph.invoke({
@@ -448,9 +492,10 @@ export function createAnalysisSupervisorSubGraph(model: ChatOpenAI) {
       };
     } catch (e) {
       const durationMs = Date.now() - startMs;
-      console.log(`[security-expert] 失败 (${durationMs}ms): ${e instanceof Error ? e.message : e}`);
+      const errMsg = e instanceof Error ? e.message : String(e);
+      console.log(`[security-expert] 失败 (${durationMs}ms): ${errMsg}`);
       return {
-        securityAnalysis:  `[ERROR] 安全专家分析失败: ${e instanceof Error ? e.message : String(e)}`,
+        securityAnalysis:  `[security 专家暂不可用：${errMsg}] 本项分析已跳过，建议人工补充。`,
         securityToolCalls: [],
         expertTimings: { security: { startMs, durationMs, error: true } },
       };
@@ -462,6 +507,14 @@ export function createAnalysisSupervisorSubGraph(model: ChatOpenAI) {
   ): Promise<Partial<SupervisorSubStateType>> => {
     if (!state.activeExperts.includes('compliance')) return {};
     const startMs = Date.now();
+    if (forceFailExperts.includes('compliance')) {
+      console.log(`[compliance-expert] 强制降级测试`);
+      return {
+        complianceAnalysis:  '[compliance 专家暂不可用：[TEST] 强制降级测试] 本项分析已跳过，建议人工补充。',
+        complianceToolCalls: [],
+        expertTimings: { compliance: { startMs, durationMs: 0, error: true } },
+      };
+    }
     console.log(`[compliance-expert] 开始分析… t=${startMs}`);
     try {
       const result = await complianceSubGraph.invoke({
@@ -479,9 +532,10 @@ export function createAnalysisSupervisorSubGraph(model: ChatOpenAI) {
       };
     } catch (e) {
       const durationMs = Date.now() - startMs;
-      console.log(`[compliance-expert] 失败 (${durationMs}ms): ${e instanceof Error ? e.message : e}`);
+      const errMsg = e instanceof Error ? e.message : String(e);
+      console.log(`[compliance-expert] 失败 (${durationMs}ms): ${errMsg}`);
       return {
-        complianceAnalysis:  `[ERROR] 合规专家分析失败: ${e instanceof Error ? e.message : String(e)}`,
+        complianceAnalysis:  `[compliance 专家暂不可用：${errMsg}] 本项分析已跳过，建议人工补充。`,
         complianceToolCalls: [],
         expertTimings: { compliance: { startMs, durationMs, error: true } },
       };
@@ -503,17 +557,23 @@ export function createAnalysisSupervisorSubGraph(model: ChatOpenAI) {
       `# 多专家需求分析\n\n> **参与专家**：${state.activeExperts.join(' · ')}`,
     ];
 
+    const isDeg = (s: string) => s.includes('专家暂不可用') || s.startsWith('[ERROR]');
+    const renderSection = (header: string, content: string) =>
+      isDeg(content)
+        ? `---\n\n## ⚠️ ${header}（降级）\n\n> ${content}`
+        : `---\n\n## ${header}\n\n${content}`;
+
     if (state.activeExperts.includes('functional') && state.functionalAnalysis.trim()) {
-      parts.push(`---\n\n## 功能分析\n\n${state.functionalAnalysis}`);
+      parts.push(renderSection('功能分析', state.functionalAnalysis));
     }
     if (state.activeExperts.includes('performance') && state.performanceAnalysis.trim()) {
-      parts.push(`---\n\n## 性能与架构分析\n\n${state.performanceAnalysis}`);
+      parts.push(renderSection('性能与架构分析', state.performanceAnalysis));
     }
     if (state.activeExperts.includes('security') && state.securityAnalysis.trim()) {
-      parts.push(`---\n\n## 安全分析\n\n${state.securityAnalysis}`);
+      parts.push(renderSection('安全分析', state.securityAnalysis));
     }
     if (state.activeExperts.includes('compliance') && state.complianceAnalysis.trim()) {
-      parts.push(`---\n\n## 合规分析\n\n${state.complianceAnalysis}`);
+      parts.push(renderSection('合规分析', state.complianceAnalysis));
     }
 
     const analysisResult = parts.length > 1

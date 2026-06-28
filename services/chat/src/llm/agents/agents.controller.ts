@@ -1,5 +1,6 @@
 import { Controller, Post, Body, Get } from '@nestjs/common';
 import { OrchestratorService, TEST_CASES, ANALYSIS_TEST_CASES, SUPERVISOR_TEST_CASES } from './orchestrator.service.js';
+import type { UIResponse } from './orchestrator.service.js';
 
 @Controller('api/agents')
 export class AgentsController {
@@ -65,5 +66,25 @@ export class AgentsController {
   @Post('supervisor-test')
   runSupervisorTest(@Body() body: { caseId: number }) {
     return this.orchestratorService.runSupervisorTest(body.caseId);
+  }
+
+  /** Runs orchestrate + transforms to UI-friendly response with pipeline steps. */
+  @Post('orchestrate-ui')
+  async orchestrateUi(
+    @Body() body: { input: string; skipClarification?: boolean },
+  ): Promise<UIResponse> {
+    const result = await this.orchestratorService.orchestrate(
+      body.input,
+      body.skipClarification ?? false,
+    );
+    return this.orchestratorService.toUIResponse(result);
+  }
+
+  /** Forces specific experts to fail (for testing graceful degradation). */
+  @Post('degradation-test')
+  runDegradationTest(
+    @Body() body: { forceFailExperts?: string[] },
+  ) {
+    return this.orchestratorService.runDegradationTest(body.forceFailExperts ?? ['performance']);
   }
 }

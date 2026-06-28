@@ -5,6 +5,8 @@ import type { LlmConfig } from '../model.factory.js';
 import { HumanMessage } from '@langchain/core/messages';
 import { createChatModel } from '../model.factory.js';
 import { runAnalysisGraph, keywordClassify } from '../graph/requirement-analysis-graph.js';
+import type { RequirementState } from '../graph/requirement-analysis-graph.js';
+import { createAnalysisSupervisorSubGraph } from '../graph/experts.js';
 import { TEST_CASES, runTestCase } from '../graph/test-graph.js';
 import type { TestCaseResult } from '../graph/test-graph.js';
 import {
@@ -37,10 +39,69 @@ export interface OrchestratorResult {
   queryResponse?: string;
   chatResponse?: string;
   nodeErrors?: string[];
+  // Expert fields — populated for the analyze intent.
+  activeExperts?: string[];
+  expertAnalyses?: Record<string, { output: string; degraded: boolean }>;
+}
+
+// ─── UI Response types ────────────────────────────────────────────────────────
+
+export interface UIStep {
+  label:    string;
+  status:   'completed' | 'running' | 'pending' | 'skipped' | 'degraded';
+  parallel: boolean;
+}
+
+export interface UIExpert {
+  name:     string;
+  label:    string;
+  analysis: string;
+  status:   'completed' | 'degraded' | 'skipped';
+}
+
+export interface UIResponse {
+  status:         'completed' | 'needs_clarification' | 'failed';
+  intent?:        'analyze' | 'query' | 'chat';
+  reportId?:      string;
+  report?:        string;
+  confirmation?:  { message: string; questions: string[] };
+  steps:          UIStep[];
+  experts?:       UIExpert[];
+  hasDegradation: boolean;
+  usedAgents:     string[];
+  nodeErrors?:    string[];
+  fallback?:      'manual_review';
 }
 
 export { TEST_CASES, ANALYSIS_TEST_CASES, SUPERVISOR_TEST_CASES };
 export type { TestCaseResult, AnalysisTestResult, SupervisorTestResult };
+
+// ─── Shared helpers ────────────────────────────────────────────────────────────
+
+const DEGRADED_MARKER = '专家暂不可用';
+
+function isDegraded(s: string): boolean {
+  return s.includes(DEGRADED_MARKER) || s.startsWith('[ERROR]');
+}
+
+function buildExpertAnalyses(state: {
+  functionalAnalysis:  string;
+  performanceAnalysis: string;
+  securityAnalysis:    string;
+  complianceAnalysis:  string;
+}): Record<string, { output: string; degraded: boolean }> {
+  const result: Record<string, { output: string; degraded: boolean }> = {};
+  const entries: Array<[string, string]> = [
+    ['functional',  state.functionalAnalysis  ?? ''],
+    ['performance', state.performanceAnalysis ?? ''],
+    ['security',    state.securityAnalysis    ?? ''],
+    ['compliance',  state.complianceAnalysis  ?? ''],
+  ];
+  for (const [name, output] of entries) {
+    if (output.trim()) result[name] = { output, degraded: isDegraded(output) };
+  }
+  return result;
+}
 
 function parseJson(text: string): any {
   const cleaned = text.replace(/^```(?:json)?\n?/m, '').replace(/\n?```$/m, '').trim();
@@ -138,6 +199,7 @@ export class OrchestratorService {
       const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
       const seq = String(Math.floor(Math.random() * 900) + 100);
       const reportId = `REQ-${dateStr}-${seq}`;
+      const expertAnalyses = buildExpertAnalyses(state as RequirementState);
       return {
         mode: 'fixed',
         status: hasNodeErrors ? 'failed' : 'completed',
@@ -147,6 +209,8 @@ export class OrchestratorService {
         steps,
         report: state.summary || undefined,
         nodeErrors: hasNodeErrors ? state.nodeErrors : undefined,
+        activeExperts:  (state as RequirementState).activeExperts,
+        expertAnalyses,
       };
     } catch {
       return {
@@ -189,5 +253,115 @@ export class OrchestratorService {
 
   runSupervisorTest(caseId: number): Promise<SupervisorTestResult> {
     return runSupervisorTestCase(this.model, caseId);
+  }
+
+  // ── UI Protocol ─────────────────────────────────────────────────────────────
+
+  toUIResponse(result: OrchestratorResult): UIResponse {
+    const hasDegradation = Object.values(result.expertAnalyses ?? {}).some(e => e.degraded);
+    const steps: UIStep[] = [{ label: 'classifier', status: 'completed', parallel: false }];
+
+    if (result.status === 'needs_clarification') {
+      steps.push({ label: 'clarify', status: 'running', parallel: false });
+      return {
+        status: 'needs_clarification',
+        intent: result.intent,
+        confirmation: {
+          message:   '需要补充以下信息以完成需求分析：',
+          questions: result.clarificationQuestions ?? [],
+        },
+        steps,
+        hasDegradation: false,
+        usedAgents: result.usedAgents,
+      };
+    }
+
+    const EXPERT_LABELS: Record<string, string> = {
+      functional: '功能', performance: '性能', security: '安全', compliance: '合规',
+    };
+
+    if (result.intent === 'analyze') {
+      steps.push({ label: 'extract', status: 'completed', parallel: false });
+      steps.push({ label: 'clarify', status: 'completed', parallel: false });
+
+      for (const expert of result.activeExperts ?? []) {
+        const data = result.expertAnalyses?.[expert];
+        const status: UIStep['status'] = !data ? 'skipped' : data.degraded ? 'degraded' : 'completed';
+        steps.push({ label: `${EXPERT_LABELS[expert] ?? expert}专家`, status, parallel: true });
+      }
+      steps.push({ label: 'risk',    status: 'completed', parallel: true  });
+      steps.push({ label: 'summary', status: result.status === 'failed' ? 'degraded' : 'completed', parallel: false });
+    } else {
+      steps.push({
+        label:    result.intent === 'query' ? '查询处理' : '对话处理',
+        status:   'completed',
+        parallel: false,
+      });
+    }
+
+    const experts: UIExpert[] | undefined = result.activeExperts?.map(name => {
+      const data = result.expertAnalyses?.[name];
+      return {
+        name,
+        label:    `${EXPERT_LABELS[name] ?? name}专家`,
+        analysis: data?.output ?? '',
+        status:   (!data ? 'skipped' : data.degraded ? 'degraded' : 'completed') as UIExpert['status'],
+      };
+    });
+
+    return {
+      status:       result.status,
+      intent:       result.intent,
+      reportId:     result.reportId,
+      report:       result.report,
+      steps,
+      experts,
+      hasDegradation,
+      usedAgents:   result.usedAgents,
+      nodeErrors:   result.nodeErrors,
+      fallback:     result.fallback,
+    };
+  }
+
+  // ── Degradation test (forces specific experts to fail) ─────────────────────
+
+  async runDegradationTest(
+    forceFailExperts: string[] = ['performance'],
+  ): Promise<{ uiResponse: UIResponse; forcedFailures: string[]; degradedExperts: string[] }> {
+    const supervisorGraph = createAnalysisSupervisorSubGraph(this.model, { forceFailExperts });
+    const supervisorState = await supervisorGraph.invoke({
+      extracted:
+        '开发用户数据批量导出功能，支持按条件筛选并导出含手机号、身份证号的 Excel，需审批流程',
+      activeExperts:        [],
+      functionalAnalysis:   '',
+      performanceAnalysis:  '',
+      securityAnalysis:     '',
+      complianceAnalysis:   '',
+      analysisResult:       '',
+      functionalToolCalls:  [],
+      performanceToolCalls: [],
+      securityToolCalls:    [],
+      complianceToolCalls:  [],
+      expertTimings:        {},
+    });
+
+    const expertAnalyses = buildExpertAnalyses(supervisorState);
+    const orchResult: OrchestratorResult = {
+      mode:          'fixed',
+      status:        'completed',
+      intent:        'analyze',
+      usedAgents:    ['supervisorAgent', ...supervisorState.activeExperts.map(e => `${e}Expert`)],
+      steps:         [],
+      report:        supervisorState.analysisResult,
+      activeExperts: supervisorState.activeExperts,
+      expertAnalyses,
+    };
+
+    const degradedExperts = supervisorState.activeExperts.filter(e => expertAnalyses[e]?.degraded);
+    return {
+      uiResponse:     this.toUIResponse(orchResult),
+      forcedFailures: forceFailExperts,
+      degradedExperts,
+    };
   }
 }

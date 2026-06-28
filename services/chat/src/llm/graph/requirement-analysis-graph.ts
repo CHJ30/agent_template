@@ -1,4 +1,4 @@
-import { Annotation, MessagesAnnotation, StateGraph, START, END } from '@langchain/langgraph';
+import { Annotation, MessagesAnnotation, StateGraph, START, END, MemorySaver } from '@langchain/langgraph';
 import { HumanMessage, SystemMessage } from '@langchain/core/messages';
 import { ChatOpenAI } from '@langchain/openai';
 import { z } from 'zod';
@@ -399,7 +399,7 @@ function buildNodes(model: ChatOpenAI) {
 
 // ─── Graph factory ────────────────────────────────────────────────────────────
 
-export function createAnalysisGraph(model: ChatOpenAI) {
+export function createAnalysisGraph(model: ChatOpenAI, checkpointer?: MemorySaver) {
   const {
     classifierNode, extractNode, clarifyNode, analysisNode, riskNode, summaryNode,
     queryHandlerNode, chatHandlerNode,
@@ -423,7 +423,7 @@ export function createAnalysisGraph(model: ChatOpenAI) {
     .addEdge('summaryStep',  END)
     .addEdge('queryHandler', END)
     .addEdge('chatHandler',  END)
-    .compile();
+    .compile({ checkpointer });
 }
 
 // ─── Runner ───────────────────────────────────────────────────────────────────
@@ -438,4 +438,34 @@ export async function runAnalysisGraph(
     messages: [new HumanMessage(input)],
     skipClarification,
   });
+}
+
+// ─── Checkpointer factory ─────────────────────────────────────────────────────
+// Returns PostgresSaver when DATABASE_URL is set; falls back to MemorySaver so
+// the app stays runnable without Postgres in development.
+
+export async function createPostgresSaver(): Promise<MemorySaver> {
+  const connString = process.env.DATABASE_URL;
+  if (!connString) {
+    console.warn('[checkpointer] DATABASE_URL 未配置，使用 MemorySaver');
+    return new MemorySaver();
+  }
+  try {
+    const { PostgresSaver } = await import('@langchain/langgraph-checkpoint-postgres');
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const saver = (PostgresSaver as any).fromConnString(connString);
+    await saver.setup();
+    console.log('[checkpointer] PostgresSaver 初始化成功 (共用 DATABASE_URL)');
+    return saver;
+  } catch (e) {
+    console.warn(
+      `[checkpointer] PostgresSaver 初始化失败 (${e instanceof Error ? e.message : e})，降级为 MemorySaver`,
+    );
+    return new MemorySaver();
+  }
+}
+
+/** Thread-id naming convention: user-{userId}:session-{sessionId} */
+export function makeThreadId(userId: string, sessionId: string): string {
+  return `user-${userId}:session-${sessionId}`;
 }

@@ -44,6 +44,7 @@
         "@langchain/community": "^1.1.29",
         "@langchain/core": "^1.1.48",
         "@langchain/langgraph": "^1.2.9",
+        "@langchain/langgraph-checkpoint-postgres": "^1.0.4",
         "@langchain/openai": "^1.4.7",
         "@langchain/textsplitters": "^1.0.1",
         "@nestjs/common": "^11.0.0",
@@ -240,6 +241,8 @@
     "@langchain/langgraph": ["@langchain/langgraph@1.4.1", "", { "dependencies": { "@langchain/langgraph-checkpoint": "^1.1.0", "@langchain/langgraph-sdk": "~1.9.21", "@langchain/protocol": "^0.0.16", "@standard-schema/spec": "1.1.0", "uuid": "^14.0.0" }, "peerDependencies": { "@langchain/core": "^1.1.48", "zod": "^3.25.32 || ^4.2.0", "zod-to-json-schema": "^3.x" }, "optionalPeers": ["zod-to-json-schema"] }, "sha512-rrDIeSYUqKKNASZgB5BqAFZ5y1zjrh/qc/pP/W0J7zV5+2HxrqgdMdTV6zy3RtNgDnrWShaI4EZnqObw1blWqQ=="],
 
     "@langchain/langgraph-checkpoint": ["@langchain/langgraph-checkpoint@1.1.0", "", { "dependencies": { "uuid": "^14.0.0" }, "peerDependencies": { "@langchain/core": "^1.1.44" } }, "sha512-okFt51NDyJ9J5Ey0dIfqbbdBDx+5/pXlvv9PIfdDJjAQD5bVSLuA5A9Ap7NV6Bip7qg7WCn7VdiGwv8QPq1qTw=="],
+
+    "@langchain/langgraph-checkpoint-postgres": ["@langchain/langgraph-checkpoint-postgres@1.0.4", "", { "dependencies": { "pg": "^8.12.0" }, "peerDependencies": { "@langchain/core": "^1.1.44", "@langchain/langgraph-checkpoint": "^1.0.0" } }, "sha512-wuCPq7VVqwi0+nQC5GOmheoXGJHAybgXbkA9Nn0J8nYW61WFJ3uqb4wyMbLFhAlya99EaxNNsi3FzdzV2COSzw=="],
 
     "@langchain/langgraph-sdk": ["@langchain/langgraph-sdk@1.9.21", "", { "dependencies": { "@langchain/protocol": "^0.0.16", "@types/json-schema": "^7.0.15", "p-queue": "^9.0.1", "p-retry": "^7.1.1", "uuid": "^14.0.0" }, "peerDependencies": { "@langchain/core": "^1.1.48", "react": "^18 || ^19", "react-dom": "^18 || ^19", "svelte": "^4.0.0 || ^5.0.0", "vue": "^3.0.0" }, "optionalPeers": ["react", "react-dom", "svelte", "vue"] }, "sha512-XE4DL12BkVTjTRUWi9CJN8s/hZ/mn4k2VcIsC5mWVHIepWZLmuW7T1NhVmRRZ7Kv4HpZ4O1plZkVtLpl6YLsoQ=="],
 
