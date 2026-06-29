@@ -50,6 +50,24 @@ export default function HomePage() {
           >
             生产加固
           </a>
+          <a
+            href="/mcp-inspector"
+            className="rounded-lg border border-purple-200 px-3 py-1 text-xs text-purple-600 hover:bg-purple-50 transition-colors"
+          >
+            MCP Inspector
+          </a>
+          <a
+            href="/web-search-test"
+            className="rounded-lg border border-teal-200 px-3 py-1 text-xs text-teal-600 hover:bg-teal-50 transition-colors"
+          >
+            Web Search
+          </a>
+          <a
+            href="/skills-demo"
+            className="rounded-lg border border-indigo-200 px-3 py-1 text-xs text-indigo-600 hover:bg-indigo-50 transition-colors"
+          >
+            Skills Demo
+          </a>
           <span className="text-gray-200">|</span>
           <span className="text-xs text-gray-500">当前用户：</span>
           {(Object.keys(USERS) as UserKey[]).map((k) => (
