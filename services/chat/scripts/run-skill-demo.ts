@@ -113,7 +113,7 @@ const estimateComplexityTool = new DynamicStructuredTool({
     "估算需求的开发复杂度，分析涉及的技术因子（权限/集成/AI/实时等），返回 T恤尺码（S/M/L/XL）和预估工期。",
   schema: z.object({
     requirementText: z.string().describe("待估算的需求文本"),
-    techStack: z.string().optional().describe("技术栈描述，如"React + NestJS + PostgreSQL""),
+    techStack: z.string().optional().describe("技术栈描述，如 'React + NestJS + PostgreSQL'"),
   }),
   func: async ({ requirementText, techStack }) => {
     return callPythonTool("requirement-analysis", "estimate_complexity", {
@@ -128,8 +128,8 @@ const searchCompetitorsTool = new DynamicStructuredTool({
   description:
     "搜索指定产品/功能的竞品方案，返回主要竞品的功能特性、定价和核心差异对比。",
   schema: z.object({
-    query: z.string().describe("要搜索的产品功能或场景，如"AI 写作助手""),
-    domain: z.string().optional().describe("限定领域，如"SaaS""),
+    query: z.string().describe("要搜索的产品功能或场景，如 'AI 写作助手'"),
+    domain: z.string().optional().describe("限定领域，如 'SaaS'"),
   }),
   func: async ({ query, domain }) => {
     return callPythonTool("competitor-research", "search_competitors", {
@@ -144,8 +144,8 @@ const searchBestPracticesTool = new DynamicStructuredTool({
   description:
     "搜索特定技术主题或产品领域的业界最佳实践、设计模式和避坑经验。",
   schema: z.object({
-    topic: z.string().describe("搜索主题，如"AI 产品设计最佳实践""),
-    industry: z.string().optional().describe("行业上下文，如"SaaS""),
+    topic: z.string().describe("搜索主题，如 'AI 产品设计最佳实践'"),
+    industry: z.string().optional().describe("行业上下文，如 'SaaS'"),
   }),
   func: async ({ topic, industry }) => {
     return callPythonTool("competitor-research", "search_best_practices", {
