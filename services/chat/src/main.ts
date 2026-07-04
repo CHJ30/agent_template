@@ -3,6 +3,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { NestFactory } from "@nestjs/core";
 import { AppModule } from "./app.module.js";
+import { ResponseInterceptor } from './observability/response.interceptor.js';
+import { AllExceptionsFilter } from './observability/all-exceptions.filter.js';
 
 // nest start --watch 通过 Turbo 运行时，Bun 不会自动加载 .env；手动解析
 const envFile = path.resolve(process.cwd(), '.env');
@@ -24,6 +26,8 @@ process.on('unhandledRejection', (reason) => {
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   app.enableCors({ origin: process.env.CORS_ORIGIN || 'http://localhost:3002' });
+  app.useGlobalInterceptors(new ResponseInterceptor());
+  app.useGlobalFilters(new AllExceptionsFilter());
   const port = process.env.PORT ?? 8081;
   await app.listen(port);
   console.log(`Chat service running on http://localhost:${port}`);
