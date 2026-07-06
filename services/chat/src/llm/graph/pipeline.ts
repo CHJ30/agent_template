@@ -36,6 +36,9 @@ import { ChatOpenAI } from '@langchain/openai';
 import type { RunnableConfig } from '@langchain/core/runnables';
 import { z } from 'zod';
 import { createAnalysisGraph } from './requirement-analysis-graph.js';
+import { createLogger } from '../../observability/logger.js';
+
+const log = createLogger('pipeline');
 
 // ─── Domain types ─────────────────────────────────────────────────────────────
 
@@ -175,7 +178,7 @@ async function plannerNode(
   const model = config?.configurable?.model as ChatOpenAI | undefined;
   if (!model) throw new Error('[pipeline:planner] model not provided in config.configurable');
 
-  console.log('[pipeline:planner] 开始拆解任务…');
+  log.debug('pipeline_planner_start');
   let lastErr: unknown;
 
   for (let attempt = 1; attempt <= 2; attempt++) {
@@ -187,21 +190,24 @@ async function plannerNode(
       const content = typeof response.content === 'string' ? response.content : '';
       const plan = parsePlan(content);
       if (plan) {
-        console.log(`[pipeline:planner] 计划 ${plan.length} 步: [${plan.map(s => s.id).join(', ')}]`);
+        log.info({ steps: plan.length, stepIds: plan.map(s => s.id) }, 'pipeline_planner_end');
         return { plan, currentStepIndex: 0 };
       }
       throw new Error('LLM 返回了无效的 JSON 计划');
     } catch (e) {
       lastErr = e;
       if (attempt === 1) {
-        console.log(`[pipeline:planner] attempt 1 失败 (${e instanceof Error ? e.message : e})，2s 后重试…`);
+        log.warn({ err: e instanceof Error ? e.message : String(e) }, 'pipeline_planner_retry');
         await new Promise(r => setTimeout(r, 2000));
       }
     }
   }
 
   // Fallback: treat the entire input as a single step
-  console.log(`[pipeline:planner] 解析失败，降级为单步计划: ${lastErr instanceof Error ? lastErr.message : lastErr}`);
+  log.warn(
+    { err: lastErr instanceof Error ? lastErr.message : String(lastErr) },
+    'pipeline_planner_fallback_single_step',
+  );
   return {
     plan:             [{ id: 'step-1', description: state.input, done: false }],
     currentStepIndex: 0,
@@ -226,9 +232,9 @@ async function executorNode(
   const step      = state.plan[state.currentStepIndex];
   const threadId  = `${state.parentThreadId}:r${state.retryCount}:step-${state.currentStepIndex}`;
 
-  console.log(
-    `[pipeline:executor] 执行 ${step.id} (${state.currentStepIndex + 1}/${state.plan.length}), ` +
-    `thread=${threadId}`,
+  log.debug(
+    { stepId: step.id, index: state.currentStepIndex + 1, total: state.plan.length, threadId },
+    'pipeline_executor_start',
   );
 
   let stepOutput = '';
@@ -243,10 +249,13 @@ async function executorNode(
       { configurable: { thread_id: threadId } },
     );
     stepOutput = result.summary || result.analysisResult || '';
-    console.log(`[pipeline:executor] ${step.id} 完成 (${stepOutput.length} 字符)`);
+    log.info({ stepId: step.id, outputLength: stepOutput.length }, 'pipeline_executor_end');
   } catch (e) {
     stepOutput = `[ERROR] ${step.id} 执行失败: ${e instanceof Error ? e.message : String(e)}`;
-    console.log(`[pipeline:executor] ${step.id} 失败: ${e instanceof Error ? e.message : e}`);
+    log.warn(
+      { stepId: step.id, err: e instanceof Error ? e.message : String(e) },
+      'pipeline_executor_step_failed',
+    );
   }
 
   const updatedPlan = state.plan.map((s, i) =>
@@ -281,9 +290,7 @@ async function evaluatorNode(
   if (!model) throw new Error('[pipeline:evaluator] model not provided in config.configurable');
 
   const roundResults = getCurrentRoundResults(state);
-  console.log(
-    `[pipeline:evaluator] 评估第 ${state.retryCount} 轮，共 ${roundResults.length} 步结果`,
-  );
+  log.debug({ retryCount: state.retryCount, steps: roundResults.length }, 'pipeline_evaluator_start');
 
   // ── Step 1: synthesize a joint report ─────────────────────────────────────
   const stepSummary = state.plan.map(s => {
@@ -300,10 +307,10 @@ async function evaluatorNode(
       ),
     ]);
     finalReport = typeof reportResp.content === 'string' ? reportResp.content : '';
-    console.log(`[pipeline:evaluator] 综合报告生成完成 (${finalReport.length} 字符)`);
+    log.debug({ length: finalReport.length }, 'pipeline_synthesis_end');
   } catch (e) {
     finalReport = `[SYNTHESIS ERROR] ${e instanceof Error ? e.message : String(e)}\n\n${stepSummary}`;
-    console.log(`[pipeline:evaluator] 综合报告生成失败: ${e instanceof Error ? e.message : e}`);
+    log.warn({ err: e instanceof Error ? e.message : String(e) }, 'pipeline_synthesis_failed');
   }
 
   // ── Step 2: evaluate quality ───────────────────────────────────────────────
@@ -329,14 +336,18 @@ async function evaluatorNode(
     ]) as z.infer<typeof evalSchema>;
     evalPass     = evalResult.pass;
     evalFeedback = evalResult.feedback;
-    console.log(
-      `[pipeline:evaluator] pass=${evalPass}, score=${evalResult.score}, feedback="${evalFeedback}"`,
+    log.info(
+      { pass: evalPass, score: evalResult.score, feedback: evalFeedback },
+      'pipeline_evaluation_end',
     );
   } catch (e) {
     // Default to pass on evaluator failure — prevents infinite loop on eval errors.
     evalPass     = true;
     evalFeedback = `评估节点异常 (${e instanceof Error ? e.message : String(e)})，默认通过`;
-    console.log(`[pipeline:evaluator] 评估失败，默认通过: ${e instanceof Error ? e.message : e}`);
+    log.warn(
+      { err: e instanceof Error ? e.message : String(e) },
+      'pipeline_evaluation_failed_default_pass',
+    );
   }
 
   return { finalReport, evalPass, evalFeedback };
@@ -347,14 +358,14 @@ async function evaluatorNode(
 
 function routeAfterEvaluator(state: PipelineStateType): 'reflector' | typeof END {
   if (state.evalPass) {
-    console.log('[pipeline] 质量通过，输出最终报告');
+    log.info('pipeline_completed');
     return END;
   }
   if (state.retryCount >= 1) {
-    console.log('[pipeline] 达到重试上限（1 次），强制终止');
+    log.warn({ retryCount: state.retryCount }, 'pipeline_max_retries_forced_end');
     return END;
   }
-  console.log('[pipeline] 质量不达标，进入反思修订循环');
+  log.debug('pipeline_reflection_needed');
   return 'reflector';
 }
 
@@ -369,7 +380,7 @@ async function reflectorNode(
   const model = config?.configurable?.model as ChatOpenAI | undefined;
   if (!model) throw new Error('[pipeline:reflector] model not provided in config.configurable');
 
-  console.log(`[pipeline:reflector] 反思修订 (retryCount=${state.retryCount})…`);
+  log.debug({ retryCount: state.retryCount }, 'pipeline_reflector_start');
 
   const roundResults = getCurrentRoundResults(state);
   const prevResultsSummary = roundResults
@@ -400,21 +411,24 @@ async function reflectorNode(
       const revised = parsePlan(content);
       if (revised) {
         newPlan = revised;
-        console.log(`[pipeline:reflector] 修订后计划: [${newPlan.map(s => s.id).join(', ')}]`);
+        log.info({ stepIds: newPlan.map(s => s.id) }, 'pipeline_reflector_end');
         break;
       }
       throw new Error('LLM 返回了无效的修订计划 JSON');
     } catch (e) {
       lastErr = e;
       if (attempt === 1) {
-        console.log(`[pipeline:reflector] attempt 1 失败 (${e instanceof Error ? e.message : e})，2s 后重试…`);
+        log.warn({ err: e instanceof Error ? e.message : String(e) }, 'pipeline_reflector_retry');
         await new Promise(r => setTimeout(r, 2000));
       }
     }
   }
 
   if (lastErr) {
-    console.log(`[pipeline:reflector] 修订失败，复用原计划重试: ${lastErr instanceof Error ? lastErr.message : lastErr}`);
+    log.warn(
+      { err: lastErr instanceof Error ? lastErr.message : String(lastErr) },
+      'pipeline_reflector_fallback_original_plan',
+    );
   }
 
   return {
@@ -469,7 +483,7 @@ export async function runPipeline(
   const checkpointer = new MemorySaver(); // shared across all sub-steps
   const threadId     = parentThreadId ?? `pipeline-${Date.now()}`;
 
-  console.log(`[pipeline] 启动 (thread=${threadId})`);
+  log.info({ threadId }, 'pipeline_start');
   const result = await pipeline.invoke(
     {
       input,
@@ -491,9 +505,9 @@ export async function runPipeline(
     },
   );
 
-  console.log(
-    `[pipeline] 完成 (evalPass=${result.evalPass}, retryCount=${result.retryCount}, ` +
-    `report=${result.finalReport.length} 字符)`,
+  log.info(
+    { evalPass: result.evalPass, retryCount: result.retryCount, reportLength: result.finalReport.length },
+    'pipeline_end',
   );
   return result;
 }

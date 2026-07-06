@@ -19,6 +19,9 @@ import {
   runSupervisorTestCase,
 } from '../graph/supervisor-test-cases.js';
 import type { SupervisorTestResult } from '../graph/supervisor-test-cases.js';
+import { createLogger } from '../../observability/logger.js';
+
+const log = createLogger('orchestrator');
 
 export interface OrchestratorStep {
   agent: string;
@@ -464,7 +467,7 @@ export class OrchestratorService {
       } catch (e) {
         lastErr = e;
         if (attempt === 1) {
-          console.log(`[ping] attempt 1 failed (${e instanceof Error ? e.message : e}), retrying in 2s…`);
+          log.warn({ err: e instanceof Error ? e.message : String(e) }, 'ping_retry_after_failure');
           await new Promise(r => setTimeout(r, 2000));
         }
       }

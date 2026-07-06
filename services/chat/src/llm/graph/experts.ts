@@ -21,6 +21,9 @@ import {
   checkPerfBudgetTool,
   checkSecurityPolicyTool,
 } from '../tools/analysis-tools.js';
+import { createLogger } from '../../observability/logger.js';
+
+const log = createLogger('experts');
 
 // ─── Tool type union ─────────────────────────────────────────────────────────
 
@@ -73,8 +76,9 @@ export function createExpertSubGraph(
       } catch (e) {
         lastErr = e;
         if (attempt === 1) {
-          console.log(
-            `[expert-subgraph:${name}] attempt 1 failed (${e instanceof Error ? e.message : e}), retrying in 2s…`,
+          log.warn(
+            { expert: name, err: e instanceof Error ? e.message : String(e) },
+            'expert_agent_retry',
           );
           await new Promise(r => setTimeout(r, 2000));
         }
@@ -82,7 +86,7 @@ export function createExpertSubGraph(
     }
     // Both attempts failed → synthetic degradation message so graph can finish.
     const errMsg = lastErr instanceof Error ? lastErr.message : String(lastErr);
-    console.log(`[expert-subgraph:${name}] 两次尝试均失败，降级输出`);
+    log.warn({ expert: name, err: errMsg }, 'expert_agent_degraded');
     return {
       messages: [
         new AIMessage(
@@ -99,8 +103,9 @@ export function createExpertSubGraph(
     const last = state.messages.at(-1) ?? null;
     const calls = (last && isAIMessage(last) ? (last.tool_calls ?? []) : []) as { name: string }[];
     const newToolNames = calls.map(c => c.name);
-    console.log(
-      `[expert-subgraph] → tools (loop ${state.expertLoopCount + 1}/${MAX_EXPERT_LOOPS}) [${newToolNames.join(', ')}]`,
+    log.debug(
+      { loop: state.expertLoopCount + 1, maxLoops: MAX_EXPERT_LOOPS, tools: newToolNames },
+      'expert_tools_start',
     );
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const result = (await rawToolNode.invoke(state)) as any;
@@ -133,7 +138,7 @@ export function createExpertSubGraph(
     const aiMsg = last as AIMessage;
     if (!aiMsg.tool_calls?.length) return 'finalize';
     if (state.expertLoopCount >= MAX_EXPERT_LOOPS) {
-      console.log(`[expert-subgraph] max loops (${MAX_EXPERT_LOOPS}) reached → forcing finalize`);
+      log.warn({ maxLoops: MAX_EXPERT_LOOPS }, 'expert_max_loops_forced_finalize');
       return 'finalize';
     }
     return 'tools';
@@ -354,7 +359,7 @@ export function createAnalysisSupervisorSubGraph(
   const supervisorNode = async (
     state: SupervisorSubStateType,
   ): Promise<Partial<SupervisorSubStateType>> => {
-    console.log('[supervisor] 判断需要哪些专家…');
+    log.debug('supervisor_start');
     try {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const structured = (model as any).withStructuredOutput(supervisorSchema);
@@ -362,13 +367,15 @@ export function createAnalysisSupervisorSubGraph(
         new SystemMessage(SUPERVISOR_SYSTEM),
         new HumanMessage(`需求内容：\n\n${state.extracted}`),
       ]) as z.infer<typeof supervisorSchema>;
-      console.log(
-        `[supervisor] 选中专家: [${result.activeExperts.join(', ')}] | 原因: ${result.reasoning}`,
+      log.info(
+        { activeExperts: result.activeExperts, reasoning: result.reasoning },
+        'supervisor_experts_selected',
       );
       return { activeExperts: result.activeExperts };
     } catch (e) {
-      console.log(
-        `[supervisor] 结构化输出失败 (${e instanceof Error ? e.message : e})，降级为 functional`,
+      log.warn(
+        { err: e instanceof Error ? e.message : String(e) },
+        'supervisor_fallback_functional',
       );
       return { activeExperts: ['functional'] };
     }
@@ -388,14 +395,14 @@ export function createAnalysisSupervisorSubGraph(
     if (!state.activeExperts.includes('functional')) return {};
     const startMs = Date.now();
     if (forceFailExperts.includes('functional')) {
-      console.log(`[functional-expert] 强制降级测试`);
+      log.warn({ expert: 'functional' }, 'expert_forced_failure_test');
       return {
         functionalAnalysis:  '[functional 专家暂不可用：[TEST] 强制降级测试] 本项分析已跳过，建议人工补充。',
         functionalToolCalls: [],
         expertTimings: { functional: { startMs, durationMs: 0, error: true } },
       };
     }
-    console.log(`[functional-expert] 开始分析… t=${startMs}`);
+    log.debug({ expert: 'functional', startMs }, 'expert_start');
     try {
       const result = await functionalSubGraph.invoke({
         messages:        [new HumanMessage(`请分析以下需求：\n\n${state.extracted}`)],
@@ -404,7 +411,10 @@ export function createAnalysisSupervisorSubGraph(
         toolCallLog:     [],
       });
       const durationMs = Date.now() - startMs;
-      console.log(`[functional-expert] 完成 (${durationMs}ms, tools=[${result.toolCallLog.join(', ')}], ${result.expertOutput.length} 字符)`);
+      log.info(
+        { expert: 'functional', durationMs, tools: result.toolCallLog, outputLength: result.expertOutput.length },
+        'expert_end',
+      );
       return {
         functionalAnalysis:  result.expertOutput,
         functionalToolCalls: result.toolCallLog,
@@ -413,7 +423,7 @@ export function createAnalysisSupervisorSubGraph(
     } catch (e) {
       const durationMs = Date.now() - startMs;
       const errMsg = e instanceof Error ? e.message : String(e);
-      console.log(`[functional-expert] 失败 (${durationMs}ms): ${errMsg}`);
+      log.warn({ expert: 'functional', durationMs, err: errMsg }, 'expert_degraded');
       return {
         functionalAnalysis:  `[functional 专家暂不可用：${errMsg}] 本项分析已跳过，建议人工补充。`,
         functionalToolCalls: [],
@@ -428,14 +438,14 @@ export function createAnalysisSupervisorSubGraph(
     if (!state.activeExperts.includes('performance')) return {};
     const startMs = Date.now();
     if (forceFailExperts.includes('performance')) {
-      console.log(`[performance-expert] 强制降级测试`);
+      log.warn({ expert: 'performance' }, 'expert_forced_failure_test');
       return {
         performanceAnalysis:  '[performance 专家暂不可用：[TEST] 强制降级测试] 本项分析已跳过，建议人工补充。',
         performanceToolCalls: [],
         expertTimings: { performance: { startMs, durationMs: 0, error: true } },
       };
     }
-    console.log(`[performance-expert] 开始分析… t=${startMs}`);
+    log.debug({ expert: 'performance', startMs }, 'expert_start');
     try {
       const result = await performanceSubGraph.invoke({
         messages:        [new HumanMessage(`请分析以下需求的性能与架构要求：\n\n${state.extracted}`)],
@@ -444,7 +454,10 @@ export function createAnalysisSupervisorSubGraph(
         toolCallLog:     [],
       });
       const durationMs = Date.now() - startMs;
-      console.log(`[performance-expert] 完成 (${durationMs}ms, tools=[${result.toolCallLog.join(', ')}], ${result.expertOutput.length} 字符)`);
+      log.info(
+        { expert: 'performance', durationMs, tools: result.toolCallLog, outputLength: result.expertOutput.length },
+        'expert_end',
+      );
       return {
         performanceAnalysis:  result.expertOutput,
         performanceToolCalls: result.toolCallLog,
@@ -453,7 +466,7 @@ export function createAnalysisSupervisorSubGraph(
     } catch (e) {
       const durationMs = Date.now() - startMs;
       const errMsg = e instanceof Error ? e.message : String(e);
-      console.log(`[performance-expert] 失败 (${durationMs}ms): ${errMsg}`);
+      log.warn({ expert: 'performance', durationMs, err: errMsg }, 'expert_degraded');
       return {
         performanceAnalysis:  `[performance 专家暂不可用：${errMsg}] 本项分析已跳过，建议人工补充。`,
         performanceToolCalls: [],
@@ -468,14 +481,14 @@ export function createAnalysisSupervisorSubGraph(
     if (!state.activeExperts.includes('security')) return {};
     const startMs = Date.now();
     if (forceFailExperts.includes('security')) {
-      console.log(`[security-expert] 强制降级测试`);
+      log.warn({ expert: 'security' }, 'expert_forced_failure_test');
       return {
         securityAnalysis:  '[security 专家暂不可用：[TEST] 强制降级测试] 本项分析已跳过，建议人工补充。',
         securityToolCalls: [],
         expertTimings: { security: { startMs, durationMs: 0, error: true } },
       };
     }
-    console.log(`[security-expert] 开始分析… t=${startMs}`);
+    log.debug({ expert: 'security', startMs }, 'expert_start');
     try {
       const result = await securitySubGraph.invoke({
         messages:        [new HumanMessage(`请分析以下需求的安全与权限要求：\n\n${state.extracted}`)],
@@ -484,7 +497,10 @@ export function createAnalysisSupervisorSubGraph(
         toolCallLog:     [],
       });
       const durationMs = Date.now() - startMs;
-      console.log(`[security-expert] 完成 (${durationMs}ms, tools=[${result.toolCallLog.join(', ')}], ${result.expertOutput.length} 字符)`);
+      log.info(
+        { expert: 'security', durationMs, tools: result.toolCallLog, outputLength: result.expertOutput.length },
+        'expert_end',
+      );
       return {
         securityAnalysis:  result.expertOutput,
         securityToolCalls: result.toolCallLog,
@@ -493,7 +509,7 @@ export function createAnalysisSupervisorSubGraph(
     } catch (e) {
       const durationMs = Date.now() - startMs;
       const errMsg = e instanceof Error ? e.message : String(e);
-      console.log(`[security-expert] 失败 (${durationMs}ms): ${errMsg}`);
+      log.warn({ expert: 'security', durationMs, err: errMsg }, 'expert_degraded');
       return {
         securityAnalysis:  `[security 专家暂不可用：${errMsg}] 本项分析已跳过，建议人工补充。`,
         securityToolCalls: [],
@@ -508,14 +524,14 @@ export function createAnalysisSupervisorSubGraph(
     if (!state.activeExperts.includes('compliance')) return {};
     const startMs = Date.now();
     if (forceFailExperts.includes('compliance')) {
-      console.log(`[compliance-expert] 强制降级测试`);
+      log.warn({ expert: 'compliance' }, 'expert_forced_failure_test');
       return {
         complianceAnalysis:  '[compliance 专家暂不可用：[TEST] 强制降级测试] 本项分析已跳过，建议人工补充。',
         complianceToolCalls: [],
         expertTimings: { compliance: { startMs, durationMs: 0, error: true } },
       };
     }
-    console.log(`[compliance-expert] 开始分析… t=${startMs}`);
+    log.debug({ expert: 'compliance', startMs }, 'expert_start');
     try {
       const result = await complianceSubGraph.invoke({
         messages:        [new HumanMessage(`请分析以下需求的合规与数据治理要求：\n\n${state.extracted}`)],
@@ -524,7 +540,10 @@ export function createAnalysisSupervisorSubGraph(
         toolCallLog:     [],
       });
       const durationMs = Date.now() - startMs;
-      console.log(`[compliance-expert] 完成 (${durationMs}ms, tools=[${result.toolCallLog.join(', ')}], ${result.expertOutput.length} 字符)`);
+      log.info(
+        { expert: 'compliance', durationMs, tools: result.toolCallLog, outputLength: result.expertOutput.length },
+        'expert_end',
+      );
       return {
         complianceAnalysis:  result.expertOutput,
         complianceToolCalls: result.toolCallLog,
@@ -533,7 +552,7 @@ export function createAnalysisSupervisorSubGraph(
     } catch (e) {
       const durationMs = Date.now() - startMs;
       const errMsg = e instanceof Error ? e.message : String(e);
-      console.log(`[compliance-expert] 失败 (${durationMs}ms): ${errMsg}`);
+      log.warn({ expert: 'compliance', durationMs, err: errMsg }, 'expert_degraded');
       return {
         complianceAnalysis:  `[compliance 专家暂不可用：${errMsg}] 本项分析已跳过，建议人工补充。`,
         complianceToolCalls: [],
@@ -547,11 +566,9 @@ export function createAnalysisSupervisorSubGraph(
   const aggregatorNode = async (
     state: SupervisorSubStateType,
   ): Promise<Partial<SupervisorSubStateType>> => {
-    const timingsSummary = Object.entries(state.expertTimings)
-      .map(([k, v]) => `${k}:${v.durationMs}ms${v.error ? '(err)' : ''}`)
-      .join(', ');
-    console.log(
-      `[aggregator] 合并专家结论 (activeExperts=[${state.activeExperts.join(', ')}], timings={${timingsSummary}})`,
+    log.info(
+      { activeExperts: state.activeExperts, timings: state.expertTimings },
+      'aggregator_end',
     );
     const parts: string[] = [
       `# 多专家需求分析\n\n> **参与专家**：${state.activeExperts.join(' · ')}`,

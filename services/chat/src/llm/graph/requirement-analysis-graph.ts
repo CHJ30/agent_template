@@ -9,6 +9,9 @@ import {
 } from '../agents/sub-agents.js';
 import { createAnalysisSubGraph } from './analysis-sub-graph.js';
 import { createAnalysisSupervisorSubGraph } from './experts.js';
+import { createLogger } from '../../observability/logger.js';
+
+const log = createLogger('requirement-graph');
 
 // ─── State ─────────────────────────────────────────────────────────────────────
 
@@ -196,7 +199,7 @@ export function createSummarySubGraph(model: ChatOpenAI) {
       new SystemMessage(CRITIC_SYSTEM),
       new HumanMessage(`待评审报告：\n\n${state.summary}\n\n请按标准评审。`),
     ]) as z.infer<typeof criticSchema>;
-    console.log(`[Critic] pass=${result.pass}, critique="${result.critique}"`);
+    log.debug({ pass: result.pass, critique: result.critique }, 'critic_result');
     return { critique: result.pass ? '' : result.critique };
   };
 
@@ -209,7 +212,7 @@ export function createSummarySubGraph(model: ChatOpenAI) {
       ),
     ]);
     const newCount = state.reviseCount + 1;
-    console.log(`[Refine] reviseCount=${newCount}`);
+    log.debug({ reviseCount: newCount }, 'refine_applied');
     const summary = typeof response.content === 'string'
       ? response.content
       : JSON.stringify(response.content);
@@ -218,14 +221,14 @@ export function createSummarySubGraph(model: ChatOpenAI) {
 
   function shouldRefine(state: RequirementState): string {
     if (state.reviseCount >= 2) {
-      console.log('[Critic子图] 达到修订上限，强制终止');
+      log.warn({ reviseCount: state.reviseCount }, 'critic_loop_max_revisions_forced_end');
       return END;
     }
     if (!state.critique || state.critique.trim() === '') {
-      console.log('[Critic子图] 通过评审，完成');
+      log.info({ reviseCount: state.reviseCount }, 'critic_loop_passed');
       return END;
     }
-    console.log('[Critic子图] 未通过评审，进入 refine');
+    log.debug({ critique: state.critique }, 'critic_loop_refine_needed');
     return 'refine';
   }
 
@@ -447,7 +450,7 @@ export async function runAnalysisGraph(
 export async function createPostgresSaver(): Promise<MemorySaver> {
   const connString = process.env.DATABASE_URL;
   if (!connString) {
-    console.warn('[checkpointer] DATABASE_URL 未配置，使用 MemorySaver');
+    log.warn('checkpointer_fallback_memory_no_database_url');
     return new MemorySaver();
   }
   try {
@@ -455,11 +458,12 @@ export async function createPostgresSaver(): Promise<MemorySaver> {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const saver = (PostgresSaver as any).fromConnString(connString);
     await saver.setup();
-    console.log('[checkpointer] PostgresSaver 初始化成功 (共用 DATABASE_URL)');
+    log.info('checkpointer_postgres_ready');
     return saver;
   } catch (e) {
-    console.warn(
-      `[checkpointer] PostgresSaver 初始化失败 (${e instanceof Error ? e.message : e})，降级为 MemorySaver`,
+    log.warn(
+      { err: e instanceof Error ? e.message : String(e) },
+      'checkpointer_postgres_init_failed_fallback_memory',
     );
     return new MemorySaver();
   }
