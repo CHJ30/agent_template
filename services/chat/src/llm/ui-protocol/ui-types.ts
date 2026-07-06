@@ -147,6 +147,7 @@ export type UIComponent =
 // ─── AI response wrapper ─────────────────────────────────────────────────────
 
 export interface AIUIResponse {
+  version: '1.0';
   components: UIComponent[];
   intent?: string;
   sessionState?: string;

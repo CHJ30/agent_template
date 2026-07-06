@@ -1,6 +1,7 @@
-import { Controller, Post, Body, Get } from '@nestjs/common';
+import { Controller, Post, Body, Get, Res } from '@nestjs/common';
+import type { Response } from 'express';
 import { OrchestratorService, TEST_CASES, ANALYSIS_TEST_CASES, SUPERVISOR_TEST_CASES } from './orchestrator.service.js';
-import type { UIResponse } from './orchestrator.service.js';
+import type { UIResponse, StreamEnvelope } from './orchestrator.service.js';
 
 @Controller('api/agents')
 export class AgentsController {
@@ -66,6 +67,44 @@ export class AgentsController {
   @Post('supervisor-test')
   runSupervisorTest(@Body() body: { caseId: number }) {
     return this.orchestratorService.runSupervisorTest(body.caseId);
+  }
+
+  /**
+   * SSE streaming variant of `orchestrate`. Pushes a single, unified message
+   * envelope over one long-lived connection — the client dispatches on
+   * `messageType` (markdown / ui / progress / agent_start / agent_end / done / error).
+   */
+  @Post('orchestrate-stream')
+  async orchestrateStream(
+    @Body() body: { input: string; skipClarification?: boolean },
+    @Res() res: Response,
+  ): Promise<void> {
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no'); // disable reverse-proxy buffering
+    res.flushHeaders(); // establish the connection immediately — no 30s black-box wait
+
+    const write = (event: StreamEnvelope) => {
+      res.write(`data: ${JSON.stringify(event)}\n\n`);
+    };
+
+    try {
+      for await (const event of this.orchestratorService.orchestrateStream(
+        body.input,
+        body.skipClarification ?? false,
+      )) {
+        if (res.writableEnded) break; // client disconnected
+        write(event);
+        if (event.messageType === 'done' || event.messageType === 'error') break;
+      }
+    } catch (err) {
+      if (!res.writableEnded) {
+        write({ messageType: 'error', error: err instanceof Error ? err.message : String(err) });
+      }
+    } finally {
+      if (!res.writableEnded) res.end();
+    }
   }
 
   /** Runs orchestrate + transforms to UI-friendly response with pipeline steps. */

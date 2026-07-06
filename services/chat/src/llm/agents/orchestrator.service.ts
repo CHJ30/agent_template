@@ -4,7 +4,7 @@ import { LLM_CONFIG } from '../llm.constants.js';
 import type { LlmConfig } from '../model.factory.js';
 import { HumanMessage } from '@langchain/core/messages';
 import { createChatModel } from '../model.factory.js';
-import { runAnalysisGraph, keywordClassify } from '../graph/requirement-analysis-graph.js';
+import { runAnalysisGraph, createAnalysisGraph, keywordClassify } from '../graph/requirement-analysis-graph.js';
 import type { RequirementState } from '../graph/requirement-analysis-graph.js';
 import { createAnalysisSupervisorSubGraph } from '../graph/experts.js';
 import { TEST_CASES, runTestCase } from '../graph/test-graph.js';
@@ -75,6 +75,81 @@ export interface UIResponse {
 
 export { TEST_CASES, ANALYSIS_TEST_CASES, SUPERVISOR_TEST_CASES };
 export type { TestCaseResult, AnalysisTestResult, SupervisorTestResult };
+
+// ─── Streaming envelope (SSE) ───────────────────────────────────────────────────
+// A single, unified envelope for every message pushed over the SSE channel.
+// The frontend dispatches purely on `messageType`:
+//   - 'markdown'    → prose chunks (isChunk: true means "append, don't replace")
+//   - 'ui'           → a standalone UI component payload (cards, action buttons…)
+//   - 'progress'     → 0-100 completion percentage of the whole pipeline
+//   - 'agent_start'  → a node/agent just began executing
+//   - 'agent_end'    → a node/agent just finished executing
+//   - 'done'         → terminal event; connection closes right after
+//   - 'error'        → terminal event carrying a human-readable error message
+
+export type StreamMessageType =
+  | 'markdown'
+  | 'ui'
+  | 'progress'
+  | 'agent_start'
+  | 'agent_end'
+  | 'done'
+  | 'error';
+
+export interface StreamEnvelope {
+  messageType: StreamMessageType;
+  isChunk?: boolean;
+  agent?: string;
+  label?: string;
+  content?: string;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  component?: Record<string, any>;
+  progress?: number;
+  intent?: 'analyze' | 'query' | 'chat';
+  status?: 'completed' | 'needs_clarification' | 'failed';
+  reportId?: string;
+  usedAgents?: string[];
+  error?: string;
+}
+
+const AGENT_LABELS: Record<string, string> = {
+  classifier:    '意图识别',
+  extractStep:   '需求提取',
+  clarifyStep:   '澄清检查',
+  analysisStep:  '多维度分析',
+  riskStep:      '风险评估',
+  summaryStep:   '报告生成',
+  queryHandler:  '需求查询',
+  chatHandler:   '闲聊对话',
+};
+
+// Static "what runs next" map — the graph's edges are linear per intent branch,
+// so once we know the current node (and, for 'classifier', the resolved intent)
+// we can predict the next node without needing a running graph instance.
+const NEXT_NODE: Record<string, string | null> = {
+  extractStep:   'clarifyStep',
+  clarifyStep:   'analysisStep',
+  analysisStep:  'riskStep',
+  riskStep:      'summaryStep',
+  summaryStep:   null,
+  queryHandler:  null,
+  chatHandler:   null,
+};
+
+// Terminal, user-facing nodes whose output is prose meant to be streamed to the
+// client as markdown. Every other node ("JSON agents") is collected silently —
+// only its start/end lifecycle and progress are surfaced.
+const MARKDOWN_NODES = new Set(['summaryStep', 'queryHandler', 'chatHandler']);
+
+function totalStepsForIntent(intent: 'analyze' | 'query' | 'chat'): number {
+  // analyze: classifier → extract → clarify → analysis → risk → summary (6)
+  // query/chat: classifier → handler (2)
+  return intent === 'analyze' ? 6 : 2;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 // ─── Shared helpers ────────────────────────────────────────────────────────────
 
@@ -221,6 +296,160 @@ export class OrchestratorService {
         fallback: 'manual_review',
         steps,
       };
+    }
+  }
+
+  /**
+   * Streaming counterpart of `orchestrate()`. Drives the same compiled
+   * LangGraph via `streamMode: 'updates'` so every existing node's tested
+   * logic is reused as-is — nothing is re-implemented here.
+   *
+   * JSON agents (classifier/extract/clarify/analysis/risk) are collected
+   * silently: only their start/end lifecycle + progress is surfaced.
+   * The terminal, user-facing node (summary/query/chat handler) is replayed
+   * to the client as small markdown chunks so the UI can render it token by
+   * token, matching the streaming UX of a true token-by-token LLM stream.
+   */
+  async *orchestrateStream(
+    input: string,
+    skipClarification = false,
+  ): AsyncGenerator<StreamEnvelope> {
+    const usedAgents: string[] = [];
+    const nodeErrors: string[] = [];
+    let persistedContent = '';
+    let intent: 'analyze' | 'query' | 'chat' = keywordClassify(input);
+    let totalSteps = totalStepsForIntent(intent);
+    let completedSteps = 0;
+
+    try {
+      yield { messageType: 'progress', progress: 0 };
+      yield { messageType: 'agent_start', agent: 'classifier', label: AGENT_LABELS.classifier };
+
+      const app = createAnalysisGraph(this.model);
+      const stream = await app.stream(
+        { messages: [new HumanMessage(input)], skipClarification },
+        { streamMode: 'updates' },
+      );
+
+      let finalState: Partial<RequirementState> = {};
+      let clarifyQuestions: string[] | null = null;
+      let terminalNode: string | null = null;
+
+      for await (const chunk of stream) {
+        const [nodeName, update] = Object.entries(chunk as Record<string, Partial<RequirementState>>)[0];
+        finalState = { ...finalState, ...update };
+        if (update.nodeErrors?.length) nodeErrors.push(...update.nodeErrors);
+        usedAgents.push(nodeName);
+        completedSteps += 1;
+
+        if (nodeName === 'classifier') {
+          intent = update.intent ?? intent;
+          totalSteps = totalStepsForIntent(intent);
+        }
+
+        yield { messageType: 'agent_end', agent: nodeName, label: AGENT_LABELS[nodeName] ?? nodeName };
+        yield { messageType: 'progress', progress: Math.min(99, Math.round((completedSteps / totalSteps) * 100)) };
+
+        // ── needs_clarification short-circuit ──────────────────────────────
+        if (nodeName === 'clarifyStep' && !skipClarification) {
+          const parsed = parseJson(update.clarified ?? '');
+          if (parsed?.needsClarification === true) {
+            clarifyQuestions = Array.isArray(parsed.questions) ? parsed.questions : [];
+            break;
+          }
+        }
+
+        // ── terminal, user-facing node reached ─────────────────────────────
+        if (MARKDOWN_NODES.has(nodeName)) {
+          terminalNode = nodeName;
+          break;
+        }
+
+        const next = nodeName === 'classifier'
+          ? (intent === 'query' ? 'queryHandler' : intent === 'chat' ? 'chatHandler' : 'extractStep')
+          : NEXT_NODE[nodeName];
+        if (next) {
+          yield { messageType: 'agent_start', agent: next, label: AGENT_LABELS[next] ?? next };
+        }
+      }
+
+      // ── needs_clarification path ────────────────────────────────────────────
+      if (clarifyQuestions) {
+        yield {
+          messageType: 'ui',
+          component: {
+            type: 'card',
+            id: `card-clarify-${Date.now()}`,
+            title: '需要补充信息',
+            subtitle: '请在对话框中补充以下问题后重新提交',
+            fields: clarifyQuestions.map((q, i) => ({ label: `Q${i + 1}`, value: q })),
+          },
+        };
+        yield {
+          messageType: 'done',
+          status: 'needs_clarification',
+          intent: 'analyze',
+          usedAgents,
+        };
+        return;
+      }
+
+      // ── markdown streaming (chunked replay of the terminal node's text) ────
+      const fullText =
+        terminalNode === 'summaryStep' ? (finalState.summary ?? '') :
+        terminalNode === 'queryHandler' ? (finalState.queryResponse ?? '') :
+        (finalState.chatResponse ?? '');
+
+      const CHUNK_SIZE = 12;
+      for (let i = 0; i < fullText.length; i += CHUNK_SIZE) {
+        const piece = fullText.slice(i, i + CHUNK_SIZE);
+        persistedContent += piece;
+        yield { messageType: 'markdown', isChunk: true, agent: terminalNode ?? undefined, content: piece };
+        // eslint-disable-next-line no-await-in-loop
+        await sleep(15);
+      }
+
+      yield { messageType: 'progress', progress: 100 };
+
+      const hasNodeErrors = nodeErrors.length > 0;
+
+      if (intent === 'analyze') {
+        const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+        const seq = String(Math.floor(Math.random() * 900) + 100);
+        const reportId = `REQ-${dateStr}-${seq}`;
+
+        yield {
+          messageType: 'ui',
+          component: {
+            type: 'action_buttons',
+            id: `actions-${reportId}`,
+            layout: 'horizontal',
+            buttons: [
+              { id: 'btn-view-report', label: '查看分析报告', actionId: 'view_report', variant: 'primary', payload: { reqId: reportId } },
+            ],
+          },
+        };
+
+        yield {
+          messageType: 'done',
+          status: hasNodeErrors ? 'failed' : 'completed',
+          intent,
+          reportId,
+          usedAgents,
+          content: persistedContent,
+        };
+        return;
+      }
+
+      yield {
+        messageType: 'done',
+        status: hasNodeErrors ? 'failed' : 'completed',
+        intent,
+        usedAgents,
+        content: persistedContent,
+      };
+    } catch (err) {
+      yield { messageType: 'error', error: err instanceof Error ? err.message : String(err) };
     }
   }
 

@@ -1,8 +1,10 @@
 "use client";
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { ComponentRenderer } from "./ComponentRenderer";
-import type { AIUIResponse, UIAction, UIComponent } from "./types";
+import { normalizeAIUIResponse, componentToFallbackText, isKnownComponent } from "./protocol";
+import { streamOrchestrate } from "./sse";
+import type { AIUIResponse, StreamEnvelope, UIAction, UIComponent } from "./types";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -12,11 +14,20 @@ interface UserEntry {
   text: string;
 }
 
+interface AgentStepInfo {
+  agent: string;
+  label: string;
+  status: "active" | "done";
+}
+
 interface AssistantEntry {
   id: string;
   role: "assistant";
   components: UIComponent[];
   intent?: string;
+  progress?: number;
+  agentSteps?: AgentStepInfo[];
+  streaming?: boolean;
 }
 
 type ChatEntry = UserEntry | AssistantEntry;
@@ -29,24 +40,6 @@ interface Props {
 // ─── API helpers ──────────────────────────────────────────────────────────────
 
 const BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "";
-
-async function postChat(
-  token: string,
-  sessionId: string,
-  input: string,
-  history: Array<{ role: "user" | "assistant"; content: string }>,
-): Promise<AIUIResponse> {
-  const res = await fetch(`${BASE}/api/ui-chat/chat`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`,
-    },
-    body: JSON.stringify({ sessionId, input, history }),
-  });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json() as Promise<AIUIResponse>;
-}
 
 async function postAction(
   token: string,
@@ -62,7 +55,7 @@ async function postAction(
     body: JSON.stringify({ sessionId, action }),
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json() as Promise<AIUIResponse>;
+  return normalizeAIUIResponse(await res.json());
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
@@ -91,20 +84,89 @@ export function AIChatContainer({ token, title = "需求分析助手" }: Props) 
     setEntries((prev) => [...prev, entry]);
   }
 
-  function textHistory(): Array<{ role: "user" | "assistant"; content: string }> {
-    return entries
-      .filter((e): e is UserEntry => e.role === "user")
-      .map((e) => ({ role: "user" as const, content: e.text }));
+  function updateAssistant(id: string, updater: (e: AssistantEntry) => AssistantEntry) {
+    setEntries((prev) =>
+      prev.map((e) => (e.id === id && e.role === "assistant" ? updater(e) : e)),
+    );
   }
 
-  const applyResponse = useCallback((res: AIUIResponse) => {
-    addEntry({
-      id: crypto.randomUUID(),
-      role: "assistant",
-      components: res.components,
-      intent: res.intent,
-    });
-  }, []);
+  // Applies one SSE envelope to the assistant entry identified by `id`.
+  // `mdId` is the fixed component id used for the streamed markdown text so
+  // repeated 'markdown' chunks update the same component instead of creating
+  // a new one each time.
+  function applyStreamEvent(id: string, mdId: string, ev: StreamEnvelope) {
+    switch (ev.messageType) {
+      case "progress":
+        updateAssistant(id, (e) => ({ ...e, progress: ev.progress }));
+        return;
+
+      case "agent_start":
+        updateAssistant(id, (e) => {
+          const steps = e.agentSteps ?? [];
+          const label = ev.label ?? ev.agent ?? "";
+          const exists = steps.some((s) => s.agent === ev.agent);
+          const agentSteps = exists
+            ? steps.map((s) => (s.agent === ev.agent ? { ...s, status: "active" as const } : s))
+            : [...steps, { agent: ev.agent ?? label, label, status: "active" as const }];
+          return { ...e, agentSteps };
+        });
+        return;
+
+      case "agent_end":
+        updateAssistant(id, (e) => ({
+          ...e,
+          agentSteps: (e.agentSteps ?? []).map((s) =>
+            s.agent === ev.agent ? { ...s, status: "done" as const } : s,
+          ),
+        }));
+        return;
+
+      case "markdown":
+        updateAssistant(id, (e) => {
+          const idx = e.components.findIndex((c) => c.id === mdId);
+          if (idx === -1) {
+            return {
+              ...e,
+              components: [
+                ...e.components,
+                { type: "text", id: mdId, content: ev.content ?? "", format: "markdown" },
+              ],
+            };
+          }
+          const next = [...e.components];
+          const current = next[idx];
+          if (current.type === "text") {
+            next[idx] = { ...current, content: current.content + (ev.content ?? "") };
+          }
+          return { ...e, components: next };
+        });
+        return;
+
+      case "ui": {
+        if (!ev.component) return;
+        const renderable = ev.component;
+        const component = isKnownComponent(renderable)
+          ? renderable
+          : componentToFallbackText(renderable);
+        updateAssistant(id, (e) => ({ ...e, components: [...e.components, component] }));
+        return;
+      }
+
+      case "done":
+        updateAssistant(id, (e) => ({
+          ...e,
+          streaming: false,
+          intent: ev.intent ?? e.intent,
+          progress: 100,
+        }));
+        return;
+
+      case "error":
+        updateAssistant(id, (e) => ({ ...e, streaming: false }));
+        setError(ev.error ?? "未知错误");
+        return;
+    }
+  }
 
   async function handleSend() {
     const text = input.trim();
@@ -112,12 +174,28 @@ export function AIChatContainer({ token, title = "需求分析助手" }: Props) 
     setInput("");
     setError(null);
     addEntry({ id: crypto.randomUUID(), role: "user", text });
+
+    const assistantId = crypto.randomUUID();
+    const mdId = `md-${assistantId}`;
+    addEntry({
+      id: assistantId,
+      role: "assistant",
+      components: [],
+      progress: 0,
+      agentSteps: [],
+      streaming: true,
+    });
+
     setLoading(true);
     try {
-      const res = await postChat(token, sessionId, text, textHistory());
-      applyResponse(res);
+      for await (const ev of streamOrchestrate(`${BASE}/api/agents/orchestrate-stream`, {
+        input: text,
+      })) {
+        applyStreamEvent(assistantId, mdId, ev);
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+      updateAssistant(assistantId, (entry) => ({ ...entry, streaming: false }));
     } finally {
       setLoading(false);
     }
@@ -137,7 +215,12 @@ export function AIChatContainer({ token, title = "需求分析助手" }: Props) 
     setLoading(true);
     try {
       const res = await postAction(token, sessionId, action);
-      applyResponse(res);
+      addEntry({
+        id: crypto.randomUUID(),
+        role: "assistant",
+        components: res.components,
+        intent: res.intent,
+      });
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -191,6 +274,37 @@ export function AIChatContainer({ token, title = "需求分析助手" }: Props) 
               {entry.intent && (
                 <div className="ml-1 text-xs text-gray-400">意图：{entry.intent}</div>
               )}
+
+              {!!entry.agentSteps?.length && (
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {entry.agentSteps.map((step) => (
+                    <span
+                      key={step.agent}
+                      className={[
+                        "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs",
+                        step.status === "done"
+                          ? "bg-green-50 text-green-700"
+                          : "bg-blue-50 text-blue-700",
+                      ].join(" ")}
+                    >
+                      {step.status === "done" ? "✓" : (
+                        <span className="animate-pulse">●</span>
+                      )}
+                      {step.label}
+                    </span>
+                  ))}
+                </div>
+              )}
+
+              {entry.streaming && typeof entry.progress === "number" && (
+                <div className="h-1 w-full overflow-hidden rounded-full bg-gray-200">
+                  <div
+                    className="h-full rounded-full bg-blue-500 transition-all duration-200"
+                    style={{ width: `${entry.progress}%` }}
+                  />
+                </div>
+              )}
+
               {entry.components.map((comp) => (
                 <ComponentRenderer
                   key={comp.id}
@@ -202,18 +316,6 @@ export function AIChatContainer({ token, title = "需求分析助手" }: Props) 
             </div>
           );
         })}
-
-        {/* Loading indicator */}
-        {loading && (
-          <div className="flex items-center gap-2 text-sm text-gray-400">
-            <span className="flex gap-1">
-              <span className="animate-bounce [animation-delay:0ms]">●</span>
-              <span className="animate-bounce [animation-delay:150ms]">●</span>
-              <span className="animate-bounce [animation-delay:300ms]">●</span>
-            </span>
-            <span>思考中…</span>
-          </div>
-        )}
 
         {/* Error */}
         {error && (
