@@ -1,6 +1,7 @@
 "use client";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { AIChatContainer } from "../components/ai-ui/AIChatContainer";
+import { ObservabilityDrawer } from "../components/ObservabilityDrawer";
 
 const USERS = {
   alice: {
@@ -19,6 +20,10 @@ type UserKey = keyof typeof USERS;
 
 export default function HomePage() {
   const [userKey, setUserKey] = useState<UserKey>("alice");
+  // Shared session ID — stable for the browser tab lifetime.
+  const [sessionId, setSessionId] = useState<string>("");
+  useEffect(() => { setSessionId(crypto.randomUUID()); }, []);
+
   const user = USERS[userKey];
 
   return (
@@ -53,9 +58,15 @@ export default function HomePage() {
 
       <main className="flex flex-1 overflow-hidden p-6">
         <div className="mx-auto w-full max-w-2xl">
-          <AIChatContainer token={user.token} title={`Requirement Analysis Assistant · ${user.name}`} />
+          <AIChatContainer
+            token={user.token}
+            title={`Requirement Analysis Assistant · ${user.name}`}
+            sessionId={sessionId}
+          />
         </div>
       </main>
+
+      <ObservabilityDrawer sessionId={sessionId} />
     </div>
   );
 }

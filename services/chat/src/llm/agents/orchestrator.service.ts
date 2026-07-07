@@ -20,6 +20,8 @@ import {
 } from '../graph/supervisor-test-cases.js';
 import type { SupervisorTestResult } from '../graph/supervisor-test-cases.js';
 import { createLogger } from '../../observability/logger.js';
+import { nodeTracer } from '../../observability/node-tracer.js';
+import type { ExpertTiming, NodeTrace } from '../../observability/node-tracer.js';
 
 const log = createLogger('orchestrator');
 
@@ -316,7 +318,10 @@ export class OrchestratorService {
   async *orchestrateStream(
     input: string,
     skipClarification = false,
+    sessionId = 'anonymous',
   ): AsyncGenerator<StreamEnvelope> {
+    const requestId = `${sessionId}:${Date.now()}`;
+    nodeTracer.startRequest(sessionId, requestId);
     const usedAgents: string[] = [];
     const nodeErrors: string[] = [];
     let persistedContent = '';
@@ -327,6 +332,7 @@ export class OrchestratorService {
     try {
       yield { messageType: 'progress', progress: 0 };
       yield { messageType: 'agent_start', agent: 'classifier', label: AGENT_LABELS.classifier };
+      nodeTracer.nodeStarted(requestId, 'classifier');
 
       const app = createAnalysisGraph(this.model);
       const stream = await app.stream(
@@ -348,6 +354,19 @@ export class OrchestratorService {
         if (nodeName === 'classifier') {
           intent = update.intent ?? intent;
           totalSteps = totalStepsForIntent(intent);
+        }
+
+        // ── node lifecycle tracing ─────────────────────────────────────────
+        {
+          const anyUpdate = update as Record<string, unknown>;
+          const meta: NodeTrace['meta'] = {};
+          if (nodeName === 'classifier' && typeof anyUpdate.intent === 'string')
+            meta.intent = anyUpdate.intent as 'analyze' | 'query' | 'chat';
+          if (nodeName === 'summaryStep' && typeof anyUpdate.reviseCount === 'number')
+            meta.reviseCount = anyUpdate.reviseCount;
+          if (nodeName === 'analysisStep' && anyUpdate.expertTimings)
+            meta.expertTimings = anyUpdate.expertTimings as Record<string, ExpertTiming>;
+          nodeTracer.nodeEnded(requestId, nodeName, meta);
         }
 
         yield { messageType: 'agent_end', agent: nodeName, label: AGENT_LABELS[nodeName] ?? nodeName };
@@ -373,6 +392,7 @@ export class OrchestratorService {
           : NEXT_NODE[nodeName];
         if (next) {
           yield { messageType: 'agent_start', agent: next, label: AGENT_LABELS[next] ?? next };
+          nodeTracer.nodeStarted(requestId, next);
         }
       }
 
@@ -388,6 +408,7 @@ export class OrchestratorService {
             fields: clarifyQuestions.map((q, i) => ({ label: `Q${i + 1}`, value: q })),
           },
         };
+        nodeTracer.endRequest(requestId, 'needs_clarification');
         yield {
           messageType: 'done',
           status: 'needs_clarification',
@@ -433,6 +454,7 @@ export class OrchestratorService {
           },
         };
 
+        nodeTracer.endRequest(requestId, hasNodeErrors ? 'failed' : 'completed');
         yield {
           messageType: 'done',
           status: hasNodeErrors ? 'failed' : 'completed',
@@ -444,6 +466,7 @@ export class OrchestratorService {
         return;
       }
 
+      nodeTracer.endRequest(requestId, hasNodeErrors ? 'failed' : 'completed');
       yield {
         messageType: 'done',
         status: hasNodeErrors ? 'failed' : 'completed',
@@ -452,6 +475,7 @@ export class OrchestratorService {
         content: persistedContent,
       };
     } catch (err) {
+      nodeTracer.endRequest(requestId, 'error');
       yield { messageType: 'error', error: err instanceof Error ? err.message : String(err) };
     }
   }

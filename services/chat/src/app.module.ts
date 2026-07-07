@@ -8,10 +8,11 @@ import { ConversationModule } from './conversation/conversation.module.js';
 import { DocumentModule } from './document/document.module.js';
 import { McpModule } from './mcp/mcp.module.js';
 import { TraceMiddleware } from './observability/trace.middleware.js';
+import { ObservabilityController } from './observability/observability.controller.js';
 
 @Module({
   imports: [PrismaModule, ConversationModule, LlmModule, AdvancedModule, DocumentModule, McpModule],
-  controllers: [AppController],
+  controllers: [AppController, ObservabilityController],
   providers: [AppService],
 })
 export class AppModule implements NestModule {

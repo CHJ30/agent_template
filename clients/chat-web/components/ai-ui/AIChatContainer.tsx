@@ -35,6 +35,7 @@ type ChatEntry = UserEntry | AssistantEntry;
 interface Props {
   token: string;
   title?: string;
+  sessionId?: string;
 }
 
 // ─── API helpers ──────────────────────────────────────────────────────────────
@@ -60,10 +61,12 @@ async function postAction(
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export function AIChatContainer({ token, title = "需求分析助手" }: Props) {
+export function AIChatContainer({ token, title = "需求分析助手", sessionId: propSessionId }: Props) {
   const router = useRouter();
-  const [sessionId, setSessionId] = useState<string>('');
-  useEffect(() => { setSessionId(crypto.randomUUID()); }, []);
+  // Use the shared sessionId from the parent page if provided; otherwise generate one.
+  const [localSessionId, setLocalSessionId] = useState<string>('');
+  useEffect(() => { if (!propSessionId) setLocalSessionId(crypto.randomUUID()); }, [propSessionId]);
+  const sessionId = propSessionId || localSessionId;
   const [entries, setEntries] = useState<ChatEntry[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -190,6 +193,7 @@ export function AIChatContainer({ token, title = "需求分析助手" }: Props) 
     try {
       for await (const ev of streamOrchestrate(`${BASE}/api/agents/orchestrate-stream`, {
         input: text,
+        sessionId,
       })) {
         applyStreamEvent(assistantId, mdId, ev);
       }

@@ -76,7 +76,7 @@ export class AgentsController {
    */
   @Post('orchestrate-stream')
   async orchestrateStream(
-    @Body() body: { input: string; skipClarification?: boolean },
+    @Body() body: { input: string; skipClarification?: boolean; sessionId?: string },
     @Res() res: Response,
   ): Promise<void> {
     res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
@@ -93,6 +93,7 @@ export class AgentsController {
       for await (const event of this.orchestratorService.orchestrateStream(
         body.input,
         body.skipClarification ?? false,
+        body.sessionId,
       )) {
         if (res.writableEnded) break; // client disconnected
         write(event);
