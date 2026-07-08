@@ -19,6 +19,7 @@ import { UIFlowService } from './ui-protocol/ui-flow.service.js';
 import { UIChatController } from './ui-protocol/ui-chat.controller.js';
 import { loadLangchainConfig } from './model.factory.js';
 import { LLM_CONFIG } from './llm.constants.js';
+import { ConversationService } from '../conversation/conversation.service.js';
 
 @Module({
   imports: [AuthModule, MessageModule, DocumentModule],
@@ -33,6 +34,7 @@ import { LLM_CONFIG } from './llm.constants.js';
   providers: [
     { provide: LLM_CONFIG, useValue: loadLangchainConfig() },
     RunnableMemoryService,
+    ConversationService,
     EmbeddingService,
     VectorStoreService,
     FilesystemService,

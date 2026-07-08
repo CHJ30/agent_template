@@ -31,11 +31,19 @@ interface AssistantEntry {
 }
 
 type ChatEntry = UserEntry | AssistantEntry;
+export type { ChatEntry, UserEntry, AssistantEntry };
 
 interface Props {
   token: string;
   title?: string;
   sessionId?: string;
+  // Pre-existing messages to hydrate the chat with (e.g. when switching to a
+  // previously saved conversation). Only read once, on mount.
+  initialEntries?: ChatEntry[];
+  // Fired once per completed exchange (after the SSE stream's 'done' event)
+  // with the user's text and the assistant's full markdown reply, so the
+  // parent page can persist it (e.g. POST /api/conversations/:id/messages).
+  onExchange?: (userText: string, assistantText: string) => void;
 }
 
 // Quick-input shortcuts shown above the text box — clicking one sends it immediately.
@@ -64,13 +72,19 @@ async function postAction(
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export function AIChatContainer({ token, title = "需求分析助手", sessionId: propSessionId }: Props) {
+export function AIChatContainer({
+  token,
+  title = "需求分析助手",
+  sessionId: propSessionId,
+  initialEntries,
+  onExchange,
+}: Props) {
   const router = useRouter();
   // Use the shared sessionId from the parent page if provided; otherwise generate one.
   const [localSessionId, setLocalSessionId] = useState<string>('');
   useEffect(() => { if (!propSessionId) setLocalSessionId(crypto.randomUUID()); }, [propSessionId]);
   const sessionId = propSessionId || localSessionId;
-  const [entries, setEntries] = useState<ChatEntry[]>([]);
+  const [entries, setEntries] = useState<ChatEntry[]>(() => initialEntries ?? []);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -204,13 +218,16 @@ export function AIChatContainer({ token, title = "需求分析助手", sessionId
 
     setLoading(true);
     try {
+      let finalContent = "";
       for await (const ev of streamOrchestrate(`${BASE}/api/agents/orchestrate-stream`, {
         input: sendText,
         sessionId,
         skipClarification: options?.skipClarification ?? false,
       })) {
         applyStreamEvent(assistantId, mdId, ev);
+        if (ev.messageType === "done" && ev.content) finalContent = ev.content;
       }
+      if (finalContent) onExchange?.(text, finalContent);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       updateAssistant(assistantId, (entry) => ({ ...entry, streaming: false }));
