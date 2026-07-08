@@ -3,8 +3,8 @@
 	"version": "0.0.0",
 	"private": true,
 	"scripts": {
-		"dev": "NODE_ENV=development nest start --watch",
-		"build": "rm -rf dist tsconfig.tsbuildinfo && nest build",
+		"dev": "prisma generate && NODE_ENV=development nest start --watch",
+		"build": "prisma generate && rm -rf dist tsconfig.tsbuildinfo && nest build",
 		"start": "NODE_ENV=production bun run dist/main.js",
 		"typecheck": "tsc --noEmit",
 		"lint": "tsc --noEmit",
