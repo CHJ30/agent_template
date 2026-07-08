@@ -3,9 +3,9 @@
 	"version": "0.0.0",
 	"private": true,
 	"scripts": {
-		"dev": "nest start --watch",
+		"dev": "NODE_ENV=development nest start --watch",
 		"build": "rm -rf dist tsconfig.tsbuildinfo && nest build",
-		"start": "bun run dist/main.js",
+		"start": "NODE_ENV=production bun run dist/main.js",
 		"typecheck": "tsc --noEmit",
 		"lint": "tsc --noEmit",
 		"db:generate": "prisma generate",

@@ -1,5 +1,6 @@
 "use client";
-import type { UIComponent, UIAction } from "./types";
+import type { UIAction, RenderableUIComponent, UIComponent } from "./types";
+import { componentToFallbackText, isKnownComponent } from "./protocol";
 import { SelectionCard } from "./SelectionCard";
 import { DynamicForm } from "./DynamicForm";
 import { ConfirmationDialog } from "./ConfirmationDialog";
@@ -9,14 +10,13 @@ import { DataTable } from "./DataTable";
 import { ActionButtons } from "./ActionButtons";
 
 interface Props {
-  component: UIComponent;
+  component: RenderableUIComponent;
   onAction: (action: UIAction) => void;
   disabled?: boolean;
 }
 
 function TextDisplay({ content, format }: { content: string; format?: string }) {
   if (format === "markdown") {
-    // Minimal markdown: newlines → <br>, **bold**, `code`
     const html = content
       .replace(/&/g, "&amp;")
       .replace(/</g, "&lt;")
@@ -38,40 +38,39 @@ function TextDisplay({ content, format }: { content: string; format?: string }) 
 }
 
 export function ComponentRenderer({ component, onAction, disabled = false }: Props) {
-  switch (component.type) {
+  if (!isKnownComponent(component)) {
+    const fallback = componentToFallbackText(component);
+    return <TextDisplay content={fallback.content} format={fallback.format} />;
+  }
+
+  const knownComponent = component as UIComponent;
+
+  switch (knownComponent.type) {
     case "text":
-      return <TextDisplay content={component.content} format={component.format} />;
+      return <TextDisplay content={knownComponent.content} format={knownComponent.format} />;
 
     case "selection":
-      return <SelectionCard component={component} onAction={onAction} disabled={disabled} />;
+      return <SelectionCard component={knownComponent} onAction={onAction} disabled={disabled} />;
 
     case "form":
-      return <DynamicForm component={component} onAction={onAction} disabled={disabled} />;
+      return <DynamicForm component={knownComponent} onAction={onAction} disabled={disabled} />;
 
     case "confirmation":
-      return <ConfirmationDialog component={component} onAction={onAction} disabled={disabled} />;
+      return <ConfirmationDialog component={knownComponent} onAction={onAction} disabled={disabled} />;
 
     case "card":
-      return <InfoCard component={component} onAction={onAction} disabled={disabled} />;
+      return <InfoCard component={knownComponent} onAction={onAction} disabled={disabled} />;
 
     case "steps":
-      return <StepsProgress component={component} />;
+      return <StepsProgress component={knownComponent} />;
 
     case "table":
-      return <DataTable component={component} />;
+      return <DataTable component={knownComponent} />;
 
     case "action_buttons":
-      return <ActionButtons component={component} onAction={onAction} disabled={disabled} />;
+      return <ActionButtons component={knownComponent} onAction={onAction} disabled={disabled} />;
 
-    default: {
-      // Exhaustiveness guard: if a new type is added to the backend but not here,
-      // TypeScript will warn (via the `never` cast below).
-      const _exhaustive: never = component;
-      return (
-        <div className="rounded border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-600">
-          未知组件类型：{(_exhaustive as UIComponent).type}
-        </div>
-      );
-    }
+    default:
+      return <TextDisplay content={componentToFallbackText(component).content} format="plain" />;
   }
 }

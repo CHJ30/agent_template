@@ -145,6 +145,7 @@ export const uiResponseSchema = z.discriminatedUnion('type', [
 // ─── Full AI response (used with withStructuredOutput) ────────────────────────
 
 export const aiUIResponseSchema = z.object({
+  version: z.literal('1.0').default('1.0'),
   components: z.array(uiResponseSchema),
   intent: z.string().optional(),
   sessionState: z.string().optional(),

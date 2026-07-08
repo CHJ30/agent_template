@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import yaml from 'js-yaml';
 import { ChatOpenAI } from '@langchain/openai';
+import { LlmTracer } from '../observability/llm-tracer.js';
 
 export interface LlmConfig {
   llm: {
@@ -56,5 +57,6 @@ export function createChatModel(config: LlmConfig): ChatOpenAI {
     // retries whose rejections have no handler → unhandledRejection.
     maxRetries: 0,
     timeout: 300_000,
+    callbacks: [new LlmTracer()],
   });
 }

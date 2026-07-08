@@ -9,8 +9,11 @@ import { ToolNode } from '@langchain/langgraph/prebuilt';
 import { AIMessage, HumanMessage, SystemMessage, isAIMessage } from '@langchain/core/messages';
 import { ChatOpenAI } from '@langchain/openai';
 import { analysisTools } from '../tools/analysis-tools.js';
+import { createLogger } from '../../observability/logger.js';
 
 export const MAX_TOOL_LOOPS = 6;
+
+const log = createLogger('analysis-subgraph');
 
 // ─── Sub-graph state ──────────────────────────────────────────────────────────
 
@@ -50,9 +53,7 @@ export function createAnalysisSubGraph(model: ChatOpenAI) {
   const agentNode = async (
     state: AnalysisSubStateType,
   ): Promise<Partial<AnalysisSubStateType>> => {
-    console.log(
-      `[analysis-subgraph] → agent  (toolLoopCount=${state.toolLoopCount})`,
-    );
+    log.debug({ toolLoopCount: state.toolLoopCount }, 'analysis_subgraph_agent_start');
     const msgs = [new SystemMessage(AGENT_SYSTEM), ...state.messages];
 
     // The API proxy hard-cuts cold connections at ~20s. One retry is enough because
@@ -63,14 +64,12 @@ export function createAnalysisSubGraph(model: ChatOpenAI) {
         const response = (await agentModel.invoke(msgs)) as AIMessage;
         const names = (response.tool_calls ?? [])
           .map((tc: { name: string }) => tc.name).join(', ');
-        if (names) console.log(`[analysis-subgraph]   will call tools: [${names}]`);
+        if (names) log.debug({ tools: names }, 'analysis_subgraph_will_call_tools');
         return { messages: [response] };
       } catch (e) {
         lastErr = e;
         if (attempt === 1) {
-          console.log(
-            `[analysis-subgraph]   attempt 1 failed (${e instanceof Error ? e.message : e}), retrying in 2s…`,
-          );
+          log.warn({ err: e instanceof Error ? e.message : String(e) }, 'analysis_subgraph_agent_retry');
           await new Promise(r => setTimeout(r, 2000));
         }
       }
@@ -84,8 +83,9 @@ export function createAnalysisSubGraph(model: ChatOpenAI) {
   ): Promise<Partial<AnalysisSubStateType>> => {
     const last = state.messages.at(-1) ?? null;
     const calls = (last && isAIMessage(last) ? (last.tool_calls ?? []) : []) as { name: string }[];
-    console.log(
-      `[analysis-subgraph] → tools  (loop ${state.toolLoopCount + 1}/${MAX_TOOL_LOOPS})  [${calls.map(c => c.name).join(', ')}]`,
+    log.debug(
+      { loop: state.toolLoopCount + 1, maxLoops: MAX_TOOL_LOOPS, tools: calls.map(c => c.name) },
+      'analysis_subgraph_tools_start',
     );
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const result = (await rawToolNode.invoke(state)) as any;
@@ -99,9 +99,7 @@ export function createAnalysisSubGraph(model: ChatOpenAI) {
   const finalizeNode = async (
     state: AnalysisSubStateType,
   ): Promise<Partial<AnalysisSubStateType>> => {
-    console.log(
-      `[analysis-subgraph] → finalize  (totalToolLoops=${state.toolLoopCount})`,
-    );
+    log.info({ totalToolLoops: state.toolLoopCount }, 'analysis_subgraph_finalize');
     const lastAI = [...state.messages]
       .reverse()
       .find((m): m is AIMessage => isAIMessage(m));
@@ -120,9 +118,7 @@ export function createAnalysisSubGraph(model: ChatOpenAI) {
     const aiMsg = last as AIMessage;
     if (!aiMsg.tool_calls?.length) return 'finalize';
     if (state.toolLoopCount >= MAX_TOOL_LOOPS) {
-      console.log(
-        `[analysis-subgraph]   max tool loops (${MAX_TOOL_LOOPS}) reached → forcing finalize`,
-      );
+      log.warn({ maxLoops: MAX_TOOL_LOOPS }, 'analysis_subgraph_max_loops_forced_finalize');
       return 'finalize';
     }
     return 'tools';

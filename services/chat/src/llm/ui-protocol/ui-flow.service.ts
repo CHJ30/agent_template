@@ -20,6 +20,7 @@ interface SessionState {
 
 function buildTypeSelection(): AIUIResponse {
   return {
+    version: '1.0',
     intent: 'select_type',
     sessionState: 'select_type',
     components: [
@@ -42,6 +43,7 @@ function buildTypeSelection(): AIUIResponse {
 
 function buildDetailForm(typeLabel: string): AIUIResponse {
   return {
+    version: '1.0',
     intent: 'fill_detail',
     sessionState: 'fill_detail',
     components: [
@@ -114,6 +116,7 @@ function buildConfirm(typeLabel: string, data: Record<string, unknown>): AIUIRes
   const stakeholders = String(data['stakeholders'] ?? '—');
 
   return {
+    version: '1.0',
     intent: 'confirm',
     sessionState: 'confirm',
     components: [
@@ -155,6 +158,7 @@ function buildConfirm(typeLabel: string, data: Record<string, unknown>): AIUIRes
 
 function buildResult(reqId: string, typeLabel: string): AIUIResponse {
   return {
+    version: '1.0',
     intent: 'result',
     sessionState: 'result',
     components: [
@@ -225,6 +229,7 @@ export class UIFlowService {
 
     if (lower.includes('报告') || lower.includes('查看') || lower.includes('report')) {
       return {
+        version: '1.0',
         intent: 'view_report',
         sessionState: 'result',
         components: [
@@ -326,6 +331,7 @@ export class UIFlowService {
 
       case 'view_report':
         return {
+          version: '1.0',
           intent: 'view_report',
           sessionState: 'result',
           components: [
@@ -340,6 +346,7 @@ export class UIFlowService {
 
       case 'ask_followup':
         return {
+          version: '1.0',
           intent: 'ask_followup',
           sessionState: 'result',
           components: [
@@ -354,6 +361,7 @@ export class UIFlowService {
 
       case 'export_report':
         return {
+          version: '1.0',
           intent: 'export_report',
           sessionState: 'result',
           components: [
@@ -401,6 +409,7 @@ export class UIFlowService {
 
   private errorResponse(message: string): AIUIResponse {
     return {
+      version: '1.0',
       intent: 'error',
       components: [{ type: 'text', id: 'txt-error', content: message, format: 'plain' }],
     };

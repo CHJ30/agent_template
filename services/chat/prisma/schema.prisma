@@ -77,3 +77,15 @@ model task_events {
   createdAt DateTime   @default(now())
   readAt    DateTime?
 }
+
+model requirement_reports {
+  id             String   @id                       // reportId, e.g. REQ-20260708-123
+  userId         String?
+  input          String                              // original user requirement description
+  extracted      String?
+  analysisResult String?
+  risk           String?
+  summary        String                              // final markdown report (queried back later)
+  status         String   @default("completed")
+  createdAt      DateTime @default(now())
+}

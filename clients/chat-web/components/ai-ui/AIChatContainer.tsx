@@ -1,8 +1,10 @@
 "use client";
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { ComponentRenderer } from "./ComponentRenderer";
-import type { AIUIResponse, UIAction, UIComponent } from "./types";
+import { normalizeAIUIResponse, componentToFallbackText, isKnownComponent } from "./protocol";
+import { streamOrchestrate } from "./sse";
+import type { AIUIResponse, StreamEnvelope, UIAction, UIComponent } from "./types";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -12,11 +14,20 @@ interface UserEntry {
   text: string;
 }
 
+interface AgentStepInfo {
+  agent: string;
+  label: string;
+  status: "active" | "done";
+}
+
 interface AssistantEntry {
   id: string;
   role: "assistant";
   components: UIComponent[];
   intent?: string;
+  progress?: number;
+  agentSteps?: AgentStepInfo[];
+  streaming?: boolean;
 }
 
 type ChatEntry = UserEntry | AssistantEntry;
@@ -24,29 +35,15 @@ type ChatEntry = UserEntry | AssistantEntry;
 interface Props {
   token: string;
   title?: string;
+  sessionId?: string;
 }
+
+// Quick-input shortcuts shown above the text box — clicking one sends it immediately.
+const QUICK_PROMPTS = ['我需要一个todo需求', '今天天气怎么样，300字小作文'];
 
 // ─── API helpers ──────────────────────────────────────────────────────────────
 
 const BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "";
-
-async function postChat(
-  token: string,
-  sessionId: string,
-  input: string,
-  history: Array<{ role: "user" | "assistant"; content: string }>,
-): Promise<AIUIResponse> {
-  const res = await fetch(`${BASE}/api/ui-chat/chat`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`,
-    },
-    body: JSON.stringify({ sessionId, input, history }),
-  });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json() as Promise<AIUIResponse>;
-}
 
 async function postAction(
   token: string,
@@ -62,19 +59,22 @@ async function postAction(
     body: JSON.stringify({ sessionId, action }),
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json() as Promise<AIUIResponse>;
+  return normalizeAIUIResponse(await res.json());
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export function AIChatContainer({ token, title = "需求分析助手" }: Props) {
+export function AIChatContainer({ token, title = "需求分析助手", sessionId: propSessionId }: Props) {
   const router = useRouter();
-  const [sessionId, setSessionId] = useState<string>('');
-  useEffect(() => { setSessionId(crypto.randomUUID()); }, []);
+  // Use the shared sessionId from the parent page if provided; otherwise generate one.
+  const [localSessionId, setLocalSessionId] = useState<string>('');
+  useEffect(() => { if (!propSessionId) setLocalSessionId(crypto.randomUUID()); }, [propSessionId]);
+  const sessionId = propSessionId || localSessionId;
   const [entries, setEntries] = useState<ChatEntry[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [lastReportId, setLastReportId] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   // Track the index of the last assistant entry so only its components are interactive
   const lastAssistantIdx = entries.reduce<number>(
@@ -91,33 +91,129 @@ export function AIChatContainer({ token, title = "需求分析助手" }: Props) 
     setEntries((prev) => [...prev, entry]);
   }
 
-  function textHistory(): Array<{ role: "user" | "assistant"; content: string }> {
-    return entries
-      .filter((e): e is UserEntry => e.role === "user")
-      .map((e) => ({ role: "user" as const, content: e.text }));
+  function updateAssistant(id: string, updater: (e: AssistantEntry) => AssistantEntry) {
+    setEntries((prev) =>
+      prev.map((e) => (e.id === id && e.role === "assistant" ? updater(e) : e)),
+    );
   }
 
-  const applyResponse = useCallback((res: AIUIResponse) => {
-    addEntry({
-      id: crypto.randomUUID(),
-      role: "assistant",
-      components: res.components,
-      intent: res.intent,
-    });
-  }, []);
+  // Applies one SSE envelope to the assistant entry identified by `id`.
+  // `mdId` is the fixed component id used for the streamed markdown text so
+  // repeated 'markdown' chunks update the same component instead of creating
+  // a new one each time.
+  function applyStreamEvent(id: string, mdId: string, ev: StreamEnvelope) {
+    switch (ev.messageType) {
+      case "progress":
+        updateAssistant(id, (e) => ({ ...e, progress: ev.progress }));
+        return;
 
-  async function handleSend() {
-    const text = input.trim();
+      case "agent_start":
+        updateAssistant(id, (e) => {
+          const steps = e.agentSteps ?? [];
+          const label = ev.label ?? ev.agent ?? "";
+          const exists = steps.some((s) => s.agent === ev.agent);
+          const agentSteps = exists
+            ? steps.map((s) => (s.agent === ev.agent ? { ...s, status: "active" as const } : s))
+            : [...steps, { agent: ev.agent ?? label, label, status: "active" as const }];
+          return { ...e, agentSteps };
+        });
+        return;
+
+      case "agent_end":
+        updateAssistant(id, (e) => ({
+          ...e,
+          agentSteps: (e.agentSteps ?? []).map((s) =>
+            s.agent === ev.agent ? { ...s, status: "done" as const } : s,
+          ),
+        }));
+        return;
+
+      case "markdown":
+        updateAssistant(id, (e) => {
+          const idx = e.components.findIndex((c) => c.id === mdId);
+          if (idx === -1) {
+            return {
+              ...e,
+              components: [
+                ...e.components,
+                { type: "text", id: mdId, content: ev.content ?? "", format: "markdown" },
+              ],
+            };
+          }
+          const next = [...e.components];
+          const current = next[idx];
+          if (current.type === "text") {
+            next[idx] = { ...current, content: current.content + (ev.content ?? "") };
+          }
+          return { ...e, components: next };
+        });
+        return;
+
+      case "ui": {
+        if (!ev.component) return;
+        const renderable = ev.component;
+        const component = isKnownComponent(renderable)
+          ? renderable
+          : componentToFallbackText(renderable);
+        updateAssistant(id, (e) => ({ ...e, components: [...e.components, component] }));
+        return;
+      }
+
+      case "done":
+        updateAssistant(id, (e) => ({
+          ...e,
+          streaming: false,
+          intent: ev.intent ?? e.intent,
+          progress: 100,
+        }));
+        if (ev.reportId) setLastReportId(ev.reportId);
+        return;
+
+      case "error":
+        updateAssistant(id, (e) => ({ ...e, streaming: false }));
+        setError(ev.error ?? "未知错误");
+        return;
+    }
+  }
+
+  async function handleSend(
+    overrideText?: string,
+    options?: { sendText?: string; skipClarification?: boolean },
+  ) {
+    const text = (overrideText ?? input).trim();
     if (!text || loading) return;
-    setInput("");
+    if (!overrideText) setInput("");
     setError(null);
     addEntry({ id: crypto.randomUUID(), role: "user", text });
+
+    // sendText carries the full context (original requirement + clarification
+    // answers) to the backend, while `text` is what's shown in the user's chat
+    // bubble — they can differ (see the clarify-form submit handler below).
+    const sendText = options?.sendText ?? text;
+
+    const assistantId = crypto.randomUUID();
+    const mdId = `md-${assistantId}`;
+    addEntry({
+      id: assistantId,
+      role: "assistant",
+      components: [],
+      progress: 0,
+      agentSteps: [],
+      streaming: true,
+    });
+
     setLoading(true);
     try {
-      const res = await postChat(token, sessionId, text, textHistory());
-      applyResponse(res);
+      for await (const ev of streamOrchestrate(`${BASE}/api/agents/orchestrate-stream`, {
+        input: sendText,
+        sessionId,
+        skipClarification: options?.skipClarification ?? false,
+      })) {
+        applyStreamEvent(assistantId, mdId, ev);
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+      updateAssistant(assistantId, (entry) => ({ ...entry, streaming: false }));
     } finally {
       setLoading(false);
     }
@@ -132,12 +228,51 @@ export function AIChatContainer({ token, title = "需求分析助手" }: Props) 
       return;
     }
 
+    // Clarify form: assemble Q&A, prepend the original requirement text (so
+    // the backend keeps full context instead of reclassifying the bare Q&A
+    // answers as a brand-new, unrelated message — e.g. mistaking it for chat),
+    // and re-run orchestration via streaming with clarification skipped.
+    if (action.actionType === "form_submit" && action.componentId.startsWith("form-clarify-")) {
+      const assistantIdx = entries.findIndex(
+        (e) => e.role === "assistant" && e.components.some((c) => c.id === action.componentId),
+      );
+      const component =
+        assistantIdx !== -1
+          ? (entries[assistantIdx] as AssistantEntry).components.find((c) => c.id === action.componentId)
+          : undefined;
+      const payload = action.payload as Record<string, string>;
+      const answerText =
+        component && component.type === "form"
+          ? component.fields
+              .map((f) => `${f.label}\n${payload[f.name] ?? ""}`)
+              .join("\n\n")
+          : Object.values(payload).filter(Boolean).join("\n");
+
+      let originalText = "";
+      for (let i = assistantIdx - 1; i >= 0; i--) {
+        const e = entries[i];
+        if (e.role === "user") {
+          originalText = e.text;
+          break;
+        }
+      }
+      const sendText = originalText ? `${originalText}\n\n补充信息：\n${answerText}` : answerText;
+
+      await handleSend(answerText, { sendText, skipClarification: true });
+      return;
+    }
+
     if (loading) return;
     setError(null);
     setLoading(true);
     try {
       const res = await postAction(token, sessionId, action);
-      applyResponse(res);
+      addEntry({
+        id: crypto.randomUUID(),
+        role: "assistant",
+        components: res.components,
+        intent: res.intent,
+      });
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -191,6 +326,37 @@ export function AIChatContainer({ token, title = "需求分析助手" }: Props) 
               {entry.intent && (
                 <div className="ml-1 text-xs text-gray-400">意图：{entry.intent}</div>
               )}
+
+              {!!entry.agentSteps?.length && (
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {entry.agentSteps.map((step) => (
+                    <span
+                      key={step.agent}
+                      className={[
+                        "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs",
+                        step.status === "done"
+                          ? "bg-green-50 text-green-700"
+                          : "bg-blue-50 text-blue-700",
+                      ].join(" ")}
+                    >
+                      {step.status === "done" ? "✓" : (
+                        <span className="animate-pulse">●</span>
+                      )}
+                      {step.label}
+                    </span>
+                  ))}
+                </div>
+              )}
+
+              {entry.streaming && typeof entry.progress === "number" && (
+                <div className="h-1 w-full overflow-hidden rounded-full bg-gray-200">
+                  <div
+                    className="h-full rounded-full bg-blue-500 transition-all duration-200"
+                    style={{ width: `${entry.progress}%` }}
+                  />
+                </div>
+              )}
+
               {entry.components.map((comp) => (
                 <ComponentRenderer
                   key={comp.id}
@@ -202,18 +368,6 @@ export function AIChatContainer({ token, title = "需求分析助手" }: Props) 
             </div>
           );
         })}
-
-        {/* Loading indicator */}
-        {loading && (
-          <div className="flex items-center gap-2 text-sm text-gray-400">
-            <span className="flex gap-1">
-              <span className="animate-bounce [animation-delay:0ms]">●</span>
-              <span className="animate-bounce [animation-delay:150ms]">●</span>
-              <span className="animate-bounce [animation-delay:300ms]">●</span>
-            </span>
-            <span>思考中…</span>
-          </div>
-        )}
 
         {/* Error */}
         {error && (
@@ -227,6 +381,29 @@ export function AIChatContainer({ token, title = "需求分析助手" }: Props) 
 
       {/* Input */}
       <div className="border-t border-gray-200 bg-white px-4 py-3">
+        <div className="mb-2 flex flex-wrap gap-2">
+          {QUICK_PROMPTS.map((prompt) => (
+            <button
+              key={prompt}
+              type="button"
+              onClick={() => void handleSend(prompt)}
+              disabled={loading}
+              className="rounded-full border border-gray-300 bg-gray-50 px-3 py-1 text-xs text-gray-600 hover:border-blue-400 hover:bg-blue-50 hover:text-blue-600 disabled:opacity-50"
+            >
+              {prompt}
+            </button>
+          ))}
+          {lastReportId && (
+            <button
+              type="button"
+              onClick={() => void handleSend(`查询 ${lastReportId} 的状态`)}
+              disabled={loading}
+              className="rounded-full border border-gray-300 bg-gray-50 px-3 py-1 text-xs text-gray-600 hover:border-blue-400 hover:bg-blue-50 hover:text-blue-600 disabled:opacity-50"
+            >
+              查询 {lastReportId}
+            </button>
+          )}
+        </div>
         <div className="flex gap-2">
           <textarea
             value={input}
@@ -240,9 +417,16 @@ export function AIChatContainer({ token, title = "需求分析助手" }: Props) 
           <button
             onClick={() => void handleSend()}
             disabled={loading || !input.trim()}
-            className="self-end rounded-xl bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-blue-300"
+            className="flex min-w-[72px] items-center justify-center gap-1.5 self-end rounded-xl bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-blue-300"
           >
-            发送
+            {loading ? (
+              <span
+                aria-label="发送中"
+                className="h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white"
+              />
+            ) : (
+              "发送"
+            )}
           </button>
         </div>
       </div>

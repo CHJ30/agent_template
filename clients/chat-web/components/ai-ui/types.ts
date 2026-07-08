@@ -138,13 +138,51 @@ export type UIComponent =
   | ActionButtonsComponent;
 
 export interface AIUIResponse {
+  version: '1.0';
   components: UIComponent[];
   intent?: string;
   sessionState?: string;
 }
 
+export interface UnknownUIComponent {
+  type: string;
+  id?: string;
+  [key: string]: unknown;
+}
+
+export type RenderableUIComponent = UIComponent | UnknownUIComponent;
+
 export interface UIAction {
   actionType: 'selection' | 'form_submit' | 'confirmation' | 'button_click';
   componentId: string;
   payload: Record<string, unknown>;
+}
+
+// ─── SSE streaming envelope ───────────────────────────────────────────────────
+// Mirror of services/chat/src/llm/agents/orchestrator.service.ts StreamEnvelope.
+// One unified message shape for every event pushed over the SSE channel — the
+// frontend dispatches purely on `messageType`.
+
+export type StreamMessageType =
+  | 'markdown'
+  | 'ui'
+  | 'progress'
+  | 'agent_start'
+  | 'agent_end'
+  | 'done'
+  | 'error';
+
+export interface StreamEnvelope {
+  messageType: StreamMessageType;
+  isChunk?: boolean;
+  agent?: string;
+  label?: string;
+  content?: string;
+  component?: UnknownUIComponent;
+  progress?: number;
+  intent?: 'analyze' | 'query' | 'chat';
+  status?: 'completed' | 'needs_clarification' | 'failed';
+  reportId?: string;
+  usedAgents?: string[];
+  error?: string;
 }

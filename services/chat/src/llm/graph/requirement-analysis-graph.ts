@@ -9,6 +9,48 @@ import {
 } from '../agents/sub-agents.js';
 import { createAnalysisSubGraph } from './analysis-sub-graph.js';
 import { createAnalysisSupervisorSubGraph } from './experts.js';
+import { createLogger } from '../../observability/logger.js';
+
+const log = createLogger('requirement-graph');
+
+// The API proxy hard-cuts cold connections at ~20s; a single retry after a
+// short delay is enough because the first attempt usually warms the backend
+// (same mitigation already used in analysis-sub-graph.ts / pipeline.ts / experts.ts —
+// every direct model call in this file goes through this helper so none of
+// them are left exposed to that cold-connection timeout).
+//
+// Every attempt is logged with its latency so a "stuck" step can be diagnosed
+// from the logs alone: `event` identifies which node/call is slow or failing,
+// `attempt` is 1 or 2, and a final `..._failed_after_retry` error log is
+// emitted (with total latency) if both attempts fail, before rethrowing.
+async function invokeWithRetry<T>(fn: () => Promise<T>, event: string): Promise<T> {
+  const attempt1Start = Date.now();
+  try {
+    const result = await fn();
+    log.debug({ event, attempt: 1, latencyMs: Date.now() - attempt1Start }, 'llm_call_ok');
+    return result;
+  } catch (e) {
+    log.warn(
+      { event, attempt: 1, latencyMs: Date.now() - attempt1Start, err: e instanceof Error ? e.message : String(e) },
+      `${event}_retry`,
+    );
+    await new Promise((r) => setTimeout(r, 2000));
+    const attempt2Start = Date.now();
+    try {
+      const result = await fn();
+      log.debug({ event, attempt: 2, latencyMs: Date.now() - attempt2Start }, 'llm_call_ok');
+      return result;
+    } catch (e2) {
+      log.error(
+        { event, attempt: 2, latencyMs: Date.now() - attempt2Start, err: e2 instanceof Error ? e2.message : String(e2) },
+        `${event}_failed_after_retry`,
+      );
+      throw e2;
+    }
+  }
+}
+
+
 
 // ─── State ─────────────────────────────────────────────────────────────────────
 
@@ -46,6 +88,7 @@ const intentSchema = z.object({
 });
 
 const REQ_ID_RE  = /REQ-\d{8}-\d{3}/i;
+export { REQ_ID_RE };
 const QUERY_KW   = ['查询', '查找', '搜索', '看看', '了解', '状态', '进度', '情况', '什么时候'];
 const CHAT_KW    = ['你好', '早上好', '晚上好', '谢谢', '请问你', '天气', '帮我聊'];
 const ANALYZE_KW = ['分析', '开发', '需要', '实现', '设计', '系统', '功能', '平台', '模块', '建立', '创建'];
@@ -167,49 +210,67 @@ const REFINE_SYSTEM = `你是需求分析师。根据评审意见修订报告。
 - 不要删除正确的内容
 - 不要改变原有的结构和风格`;
 
+// NOTE: every property here must be present in `required` for OpenAI's strict
+// structured-output mode (json_schema strict:true) — `.optional()` fields get
+// dropped from `required` by zod-to-json-schema, which OpenAI rejects with
+// "'required' is required to be ... including every key in properties".
+// Keep this schema free of optional fields (an unused `issues` field was
+// removed for this reason — nothing read it).
 const criticSchema = z.object({
   pass:     z.boolean().describe('是否通过评审'),
   critique: z.string().describe('不通过时的修改意见，通过时为空'),
-  issues:   z.array(z.string()).optional().describe('具体问题列表'),
 });
 
 export function createSummarySubGraph(model: ChatOpenAI) {
   const actorNode = async (state: RequirementState): Promise<Partial<RequirementState>> => {
     const input = String(state.messages.at(-1)?.content ?? '');
-    const response = await model.invoke([
-      new SystemMessage(ACTOR_SYSTEM),
-      new HumanMessage(
-        `原始需求：${input}\n\n提取结果：${state.extracted}\n\n` +
-        `分析结果：${state.analysisResult}\n\n风险评估：${state.risk}\n\n请生成完整的综合报告。`,
-      ),
-    ]);
+    log.debug({ inputChars: input.length }, 'actor_start');
+    const response = await invokeWithRetry(
+      () => model.invoke([
+        new SystemMessage(ACTOR_SYSTEM),
+        new HumanMessage(
+          `原始需求：${input}\n\n提取结果：${state.extracted}\n\n` +
+          `分析结果：${state.analysisResult}\n\n风险评估：${state.risk}\n\n请生成完整的综合报告。`,
+        ),
+      ]),
+      'actor',
+    );
     const summary = typeof response.content === 'string'
       ? response.content
       : JSON.stringify(response.content);
+    log.debug({ summaryChars: summary.length }, 'actor_end');
     return { summary };
   };
 
   const criticNode = async (state: RequirementState): Promise<Partial<RequirementState>> => {
+    log.debug({ reviseCount: state.reviseCount, summaryChars: state.summary.length }, 'critic_start');
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const structured = (model as any).withStructuredOutput(criticSchema);
-    const result = await structured.invoke([
-      new SystemMessage(CRITIC_SYSTEM),
-      new HumanMessage(`待评审报告：\n\n${state.summary}\n\n请按标准评审。`),
-    ]) as z.infer<typeof criticSchema>;
-    console.log(`[Critic] pass=${result.pass}, critique="${result.critique}"`);
+    const result = await invokeWithRetry(
+      () => structured.invoke([
+        new SystemMessage(CRITIC_SYSTEM),
+        new HumanMessage(`待评审报告：\n\n${state.summary}\n\n请按标准评审。`),
+      ]),
+      'critic',
+    ) as z.infer<typeof criticSchema>;
+    log.debug({ pass: result.pass, critique: result.critique }, 'critic_result');
     return { critique: result.pass ? '' : result.critique };
   };
 
   const refineNode = async (state: RequirementState): Promise<Partial<RequirementState>> => {
-    const response = await model.invoke([
-      new SystemMessage(REFINE_SYSTEM),
-      new HumanMessage(
-        `原报告：\n\n${state.summary}\n\n评审意见：\n\n${state.critique}\n\n` +
-        `请根据评审意见修订报告，只改有问题的地方。`,
-      ),
-    ]);
+    log.debug({ reviseCount: state.reviseCount, critiqueChars: state.critique.length }, 'refine_start');
+    const response = await invokeWithRetry(
+      () => model.invoke([
+        new SystemMessage(REFINE_SYSTEM),
+        new HumanMessage(
+          `原报告：\n\n${state.summary}\n\n评审意见：\n\n${state.critique}\n\n` +
+          `请根据评审意见修订报告，只改有问题的地方。`,
+        ),
+      ]),
+      'refine',
+    );
     const newCount = state.reviseCount + 1;
-    console.log(`[Refine] reviseCount=${newCount}`);
+    log.debug({ reviseCount: newCount }, 'refine_applied');
     const summary = typeof response.content === 'string'
       ? response.content
       : JSON.stringify(response.content);
@@ -217,15 +278,22 @@ export function createSummarySubGraph(model: ChatOpenAI) {
   };
 
   function shouldRefine(state: RequirementState): string {
-    if (state.reviseCount >= 2) {
-      console.log('[Critic子图] 达到修订上限，强制终止');
+    // Empirically (see summary_subgraph_end logs), the critic essentially
+    // never passes on the first draft — every observed run hit the revision
+    // cap and got force-ended anyway, meaning a 2nd refine round bought zero
+    // quality benefit for another ~15-30s of latency (each actor/critic/refine
+    // call is a separate LLM round-trip). Capped at 1 revision instead of 2 —
+    // still gives the critique one chance to improve the report, at roughly
+    // half the worst-case latency of the report-generation step.
+    if (state.reviseCount >= 1) {
+      log.warn({ reviseCount: state.reviseCount }, 'critic_loop_max_revisions_forced_end');
       return END;
     }
     if (!state.critique || state.critique.trim() === '') {
-      console.log('[Critic子图] 通过评审，完成');
+      log.info({ reviseCount: state.reviseCount }, 'critic_loop_passed');
       return END;
     }
-    console.log('[Critic子图] 未通过评审，进入 refine');
+    log.debug({ critique: state.critique }, 'critic_loop_refine_needed');
     return 'refine';
   }
 
@@ -252,10 +320,13 @@ function buildNodes(model: ChatOpenAI) {
     try {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const classifierModel = (model as any).withStructuredOutput(intentSchema);
-      const result = await classifierModel.invoke([
-        new SystemMessage(CLASSIFIER_SYSTEM),
-        new HumanMessage(input),
-      ]) as z.infer<typeof intentSchema>;
+      const result = await invokeWithRetry(
+        () => classifierModel.invoke([
+          new SystemMessage(CLASSIFIER_SYSTEM),
+          new HumanMessage(input),
+        ]),
+        'classifier',
+      ) as z.infer<typeof intentSchema>;
       const validIntents = ['analyze', 'query', 'chat'] as const;
       if (result?.intent && (validIntents as readonly string[]).includes(result.intent)) {
         return { intent: result.intent };
@@ -270,9 +341,13 @@ function buildNodes(model: ChatOpenAI) {
   const extractNode = async (state: RequirementState): Promise<Partial<RequirementState>> => {
     const input = String(state.messages.at(-1)?.content ?? '');
     try {
-      const extracted = await createExtractAgent(model).invoke({ input });
+      const extracted = await invokeWithRetry(
+        () => createExtractAgent(model).invoke({ input }),
+        'extract',
+      );
       return { extracted };
     } catch (e) {
+      log.warn({ err: e instanceof Error ? e.message : String(e) }, 'extractStep_degraded');
       return { extracted: '', nodeErrors: [`extractStep: ${e instanceof Error ? e.message : String(e)}`] };
     }
   };
@@ -280,11 +355,13 @@ function buildNodes(model: ChatOpenAI) {
   const clarifyNode = async (state: RequirementState): Promise<Partial<RequirementState>> => {
     if (state.skipClarification) return {};
     try {
-      const clarified = await createClarifyAgent(model).invoke({
-        extractedRequirement: state.extracted,
-      });
+      const clarified = await invokeWithRetry(
+        () => createClarifyAgent(model).invoke({ extractedRequirement: state.extracted }),
+        'clarify',
+      );
       return { clarified };
     } catch (e) {
+      log.warn({ err: e instanceof Error ? e.message : String(e) }, 'clarifyStep_degraded');
       return { clarified: '', nodeErrors: [`clarifyStep: ${e instanceof Error ? e.message : String(e)}`] };
     }
   };
@@ -314,6 +391,7 @@ function buildNodes(model: ChatOpenAI) {
         complianceAnalysis:  result.complianceAnalysis,
       };
     } catch (e) {
+      log.warn({ err: e instanceof Error ? e.message : String(e) }, 'analysisStep_degraded');
       return {
         analysisResult: '',
         nodeErrors: [`analysisStep: ${e instanceof Error ? e.message : String(e)}`],
@@ -323,17 +401,21 @@ function buildNodes(model: ChatOpenAI) {
 
   const riskNode = async (state: RequirementState): Promise<Partial<RequirementState>> => {
     try {
-      const risk = await createRiskAgent(model).invoke({
-        extractedRequirement: state.extracted,
-      });
+      const risk = await invokeWithRetry(
+        () => createRiskAgent(model).invoke({ extractedRequirement: state.extracted }),
+        'risk',
+      );
       return { risk };
     } catch (e) {
+      log.warn({ err: e instanceof Error ? e.message : String(e) }, 'riskStep_degraded');
       return { risk: '', nodeErrors: [`riskStep: ${e instanceof Error ? e.message : String(e)}`] };
     }
   };
 
   const summarySubGraph = createSummarySubGraph(model);
   const summaryNode = async (state: RequirementState): Promise<Partial<RequirementState>> => {
+    const startedAt = Date.now();
+    log.debug({}, 'summary_subgraph_start');
     try {
       const result = await summarySubGraph.invoke({
         ...state,
@@ -341,12 +423,24 @@ function buildNodes(model: ChatOpenAI) {
         critique:    '',
         reviseCount: 0,
       });
+      log.info(
+        {
+          latencyMs:    Date.now() - startedAt,
+          reviseCount:  result.reviseCount,
+          summaryChars: (result.summary ?? '').length,
+        },
+        'summary_subgraph_end',
+      );
       return {
         summary:     result.summary,
         critique:    result.critique,
         reviseCount: result.reviseCount,
       };
     } catch (e) {
+      log.warn(
+        { err: e instanceof Error ? e.message : String(e), latencyMs: Date.now() - startedAt },
+        'summaryStep_degraded',
+      );
       return { summary: '', nodeErrors: [`summaryStep: ${e instanceof Error ? e.message : String(e)}`] };
     }
   };
@@ -355,14 +449,18 @@ function buildNodes(model: ChatOpenAI) {
   const queryHandlerNode = async (state: RequirementState): Promise<Partial<RequirementState>> => {
     const input = String(state.messages.at(-1)?.content ?? '');
     try {
-      const result = await model.invoke([
-        new SystemMessage(
-          '你是需求查询助手。根据用户提供的需求编号或查询条件，简洁地回答关于需求状态、' +
-          '进度、负责人等信息的问题。如果没有实际数据，请说明需要连接到需求管理系统获取真实数据，' +
-          '并模拟一个合理的查询结果作为示例。',
-        ),
-        new HumanMessage(input),
-      ]);
+      const result = await invokeWithRetry(
+        () => model.invoke([
+          new SystemMessage(
+            '你是需求查询助手。根据用户提供的需求编号或查询条件，简洁地回答关于需求状态、' +
+            '进度、负责人等信息的问题。如果用户输入中包含"[系统内部数据]"标记的实际需求报告内容，' +
+            '必须基于该真实数据回答，不得编造。如果没有附带任何实际数据，请明确说明未查询到该' +
+            '需求的记录，不要虚构结果。',
+          ),
+          new HumanMessage(input),
+        ]),
+        'query_handler',
+      );
       const content = typeof result.content === 'string'
         ? result.content
         : JSON.stringify(result.content);
@@ -377,10 +475,13 @@ function buildNodes(model: ChatOpenAI) {
   const chatHandlerNode = async (state: RequirementState): Promise<Partial<RequirementState>> => {
     const input = String(state.messages.at(-1)?.content ?? '');
     try {
-      const result = await model.invoke([
-        new SystemMessage('你是友好的AI助手，负责处理与需求管理系统无关的日常对话。请给出简洁、自然的回复。'),
-        new HumanMessage(input),
-      ]);
+      const result = await invokeWithRetry(
+        () => model.invoke([
+          new SystemMessage('你是友好的AI助手，负责处理与需求管理系统无关的日常对话。请给出简洁、自然的回复。'),
+          new HumanMessage(input),
+        ]),
+        'chat_handler',
+      );
       const content = typeof result.content === 'string'
         ? result.content
         : JSON.stringify(result.content);
@@ -447,7 +548,7 @@ export async function runAnalysisGraph(
 export async function createPostgresSaver(): Promise<MemorySaver> {
   const connString = process.env.DATABASE_URL;
   if (!connString) {
-    console.warn('[checkpointer] DATABASE_URL 未配置，使用 MemorySaver');
+    log.warn('checkpointer_fallback_memory_no_database_url');
     return new MemorySaver();
   }
   try {
@@ -455,11 +556,12 @@ export async function createPostgresSaver(): Promise<MemorySaver> {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const saver = (PostgresSaver as any).fromConnString(connString);
     await saver.setup();
-    console.log('[checkpointer] PostgresSaver 初始化成功 (共用 DATABASE_URL)');
+    log.info('checkpointer_postgres_ready');
     return saver;
   } catch (e) {
-    console.warn(
-      `[checkpointer] PostgresSaver 初始化失败 (${e instanceof Error ? e.message : e})，降级为 MemorySaver`,
+    log.warn(
+      { err: e instanceof Error ? e.message : String(e) },
+      'checkpointer_postgres_init_failed_fallback_memory',
     );
     return new MemorySaver();
   }

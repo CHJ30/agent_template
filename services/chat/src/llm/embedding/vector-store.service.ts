@@ -2,6 +2,9 @@ import { Injectable, OnModuleInit } from '@nestjs/common';
 import { FakeVectorStore } from '@langchain/core/utils/testing';
 import { Document } from '@langchain/core/documents';
 import { EmbeddingService } from './embedding.service.js';
+import { createLogger } from '../../observability/logger.js';
+
+const log = createLogger('vector-store');
 
 const SEED_TEXTS = [
   // 需求规范片段
@@ -30,7 +33,14 @@ export class VectorStoreService implements OnModuleInit {
       (text, i) =>
         new Document({ pageContent: text, metadata: { source: 'seed', index: i } }),
     );
-    await this.store.addDocuments(docs);
+    // Seeding calls the real OpenAI embeddings API. Never let a transient
+    // network/API failure here block the whole app from starting — search()
+    // will simply return no results until this succeeds on a later restart.
+    try {
+      await this.store.addDocuments(docs);
+    } catch (err) {
+      log.warn({ err: err instanceof Error ? err.message : String(err) }, 'vector_store_seed_failed');
+    }
   }
 
   async addTexts(texts: string[], metadatas?: object[]): Promise<void> {
