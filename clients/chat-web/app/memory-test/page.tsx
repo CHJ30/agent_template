@@ -8,6 +8,10 @@ const BACKEND = "http://localhost:8081";
 
 const TOKEN =
   "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOiJ1c2VyLTAwMSIsImlhdCI6MTc4MTg2NDM5MywiZXhwIjoxODEzNDAwMzkzfQ.etoW-VgwcnfEPPOcBTxxTrRSHWfyEaSArrdCyqNGIns";
+// A second, unrelated account — used only by the cross-user access test
+// below to verify one user cannot read another user's session.
+const OTHER_TOKEN =
+  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOiJ1c2VyLTAwMiIsImlhdCI6MTc4MTg2NDM5MywiZXhwIjoxODEzNDAwMzkzfQ.81bNean8CFDSh19FbauV-AnkHS0u1ZxHGRbaWuBOaX8";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -57,6 +61,15 @@ async function apiDeleteConversation(id: string): Promise<void> {
     headers: authHeaders,
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
+}
+
+// Returns the raw response so callers can assert on status codes (e.g. 403)
+// instead of throwing on non-2xx — used by the cross-user access test.
+async function apiMemoryHistoryStatus(sessionId: string, token: string): Promise<number> {
+  const res = await fetch(`${BACKEND}/api/memory/history/${sessionId}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  return res.status;
 }
 
 async function apiMemoryChat(sessionId: string, input: string): Promise<string> {
@@ -156,6 +169,45 @@ async function runMultiTurnMemoryTest(): Promise<MultiTurnTestResult> {
   }
 }
 
+// ─── Cross-user access test ───────────────────────────────────────────────────
+// user-001 creates a conversation; user-002 (a different, unrelated account)
+// tries to read its history — must be rejected with 403.
+
+async function runCrossUserAccessTest(): Promise<MultiTurnTestResult> {
+  const validations: TestValidation[] = [];
+  let conversationId: string | undefined;
+
+  try {
+    const conv = await apiCreateConversation(`跨用户测试 · ${new Date().toISOString()}`);
+    conversationId = conv.id;
+
+    const status = await apiMemoryHistoryStatus(conversationId, OTHER_TOKEN);
+    validations.push({
+      key: "cross_user_denied_403",
+      description: `使用其他用户的 session 查询该会话应返回 403，实际 ${status}`,
+      pass: status === 403,
+    });
+
+    await apiDeleteConversation(conversationId);
+    validations.push({
+      key: "conversation_deleted",
+      description: "测试会话已删除",
+      pass: true,
+    });
+
+    return { validations, pass: validations.every((v) => v.pass) };
+  } catch (e) {
+    if (conversationId) {
+      try { await apiDeleteConversation(conversationId); } catch { /* ignore */ }
+    }
+    return {
+      validations,
+      pass: false,
+      error: e instanceof Error ? e.message : String(e),
+    };
+  }
+}
+
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function MemoryTestPage() {
@@ -169,6 +221,9 @@ export default function MemoryTestPage() {
 
   const [testStatus, setTestStatus] = useState<CaseStatus>("pending");
   const [testResult, setTestResult] = useState<MultiTurnTestResult | null>(null);
+
+  const [crossUserStatus, setCrossUserStatus] = useState<CaseStatus>("pending");
+  const [crossUserResult, setCrossUserResult] = useState<MultiTurnTestResult | null>(null);
 
   const refreshConversations = useCallback(async () => {
     try {
@@ -240,6 +295,15 @@ export default function MemoryTestPage() {
     const result = await runMultiTurnMemoryTest();
     setTestResult(result);
     setTestStatus(result.pass ? "pass" : "fail");
+    await refreshConversations();
+  }
+
+  async function handleRunCrossUserTest() {
+    setCrossUserStatus("running");
+    setCrossUserResult(null);
+    const result = await runCrossUserAccessTest();
+    setCrossUserResult(result);
+    setCrossUserStatus(result.pass ? "pass" : "fail");
     await refreshConversations();
   }
 
@@ -372,6 +436,50 @@ export default function MemoryTestPage() {
                   <p className="text-xs text-red-600">⚠ {testResult.error}</p>
                 )}
                 {testResult.validations.map((v) => (
+                  <div
+                    key={v.key}
+                    className={`rounded-lg px-2 py-1.5 text-[11px] ${v.pass ? "bg-emerald-50 text-emerald-700" : "bg-red-50 text-red-600"}`}
+                  >
+                    {v.pass ? "✓" : "✗"} {v.description}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Cross-user access test */}
+          <div className={`mt-4 rounded-xl border bg-white shadow-sm ${
+            crossUserStatus === "pass" ? "border-emerald-200" : crossUserStatus === "fail" ? "border-red-200" : "border-gray-200"
+          }`}>
+            <div className="flex items-center gap-2 px-4 py-3">
+              <span className="flex-1 text-sm font-semibold text-gray-800">跨用户访问测试</span>
+              {crossUserStatus === "pending" && <span className="text-xs text-gray-400">待运行</span>}
+              {crossUserStatus === "running" && (
+                <span className="flex items-center gap-1 text-xs text-amber-500">
+                  <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-400" />运行中…
+                </span>
+              )}
+              {crossUserStatus === "pass" && <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-bold text-emerald-700">✓ 通过</span>}
+              {crossUserStatus === "fail" && <span className="rounded-full bg-red-100 px-2 py-0.5 text-xs font-bold text-red-600">✗ 失败</span>}
+            </div>
+            <div className="border-t border-gray-100 px-4 py-2 text-xs text-gray-500">
+              用户 A 新建一个会话，改用用户 B 的 session 去查询该会话，验证返回 403（禁止访问），而不是意外成功或泄露数据。
+            </div>
+            <div className="border-t border-gray-100 px-4 py-3">
+              <button
+                onClick={() => void handleRunCrossUserTest()}
+                disabled={crossUserStatus === "running"}
+                className="w-full rounded-lg border border-gray-200 px-3 py-1.5 text-xs text-gray-600 hover:bg-gray-50 disabled:opacity-40"
+              >
+                运行测试
+              </button>
+            </div>
+            {crossUserResult && (
+              <div className="space-y-1.5 border-t border-gray-100 px-4 py-3">
+                {crossUserResult.error && (
+                  <p className="text-xs text-red-600">⚠ {crossUserResult.error}</p>
+                )}
+                {crossUserResult.validations.map((v) => (
                   <div
                     key={v.key}
                     className={`rounded-lg px-2 py-1.5 text-[11px] ${v.pass ? "bg-emerald-50 text-emerald-700" : "bg-red-50 text-red-600"}`}
