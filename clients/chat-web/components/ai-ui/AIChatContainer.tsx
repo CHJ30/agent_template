@@ -39,7 +39,7 @@ interface Props {
 }
 
 // Quick-input shortcuts shown above the text box — clicking one sends it immediately.
-const QUICK_PROMPTS = ['我需要一个todo需求', '今天天气怎么样，300字小作文'];
+const QUICK_PROMPTS = ['我需要一个todo需求', '今天天气怎么样，300字小作文', '查询需求REQ-20260708-247'];
 
 // ─── API helpers ──────────────────────────────────────────────────────────────
 

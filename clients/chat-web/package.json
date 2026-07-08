@@ -13,10 +13,13 @@
 		"@autix/contracts": "workspace:*",
 		"next": "16.2.3",
 		"react": "19.2.4",
-		"react-dom": "19.2.4"
+		"react-dom": "19.2.4",
+		"react-markdown": "^10.1.0",
+		"remark-gfm": "^4.0.1"
 	},
 	"devDependencies": {
 		"@tailwindcss/postcss": "^4.0.0",
+		"@tailwindcss/typography": "^0.5.20",
 		"@types/node": "^22",
 		"@types/react": "^19",
 		"@types/react-dom": "^19",
