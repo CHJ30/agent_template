@@ -5,23 +5,14 @@ import type { ChatEntry } from "../components/ai-ui/AIChatContainer";
 import { ConversationSidebar } from "../components/ai-ui/ConversationSidebar";
 import type { Conversation } from "../components/ai-ui/ConversationSidebar";
 import { ObservabilityDrawer } from "../components/ObservabilityDrawer";
-
-const BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "";
-
-const USERS = {
-  alice: {
-    name: "Alice",
-    token:
-      "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOiJ1c2VyLTAwMSIsImlhdCI6MTc4MTg2NDM5MywiZXhwIjoxODEzNDAwMzkzfQ.etoW-VgwcnfEPPOcBTxxTrRSHWfyEaSArrdCyqNGIns",
-  },
-  bob: {
-    name: "Bob",
-    token:
-      "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOiJ1c2VyLTAwMiIsImlhdCI6MTc4MTg2NDM5MywiZXhwIjoxODEzNDAwMzkzfQ.81bNean8CFDSh19FbauV-AnkHS0u1ZxHGRbaWuBOaX8",
-  },
-} as const;
-
-type UserKey = keyof typeof USERS;
+import { AppHeader } from "../components/AppHeader";
+import { useDemoUser } from "../components/useDemoUser";
+import { DocumentDropzone } from "../components/documents/DocumentDropzone";
+import { DocumentList } from "../components/documents/DocumentList";
+import { DocumentSearchPanel } from "../components/documents/DocumentSearchPanel";
+import { TaskNotifications } from "../components/documents/TaskNotifications";
+import { API_BASE, USERS } from "../lib/demoUsers";
+import { fetchDocuments, type DocumentRecord } from "../lib/documentApi";
 
 interface StoredMessage {
   id: string;
@@ -47,21 +38,31 @@ function messagesToEntries(messages: StoredMessage[]): ChatEntry[] {
 }
 
 export default function HomePage() {
-  const [userKey, setUserKey] = useState<UserKey>("alice");
+  const [userKey, setUserKey] = useDemoUser();
   const [activeConv, setActiveConv] = useState<Conversation | null>(null);
   const [initialEntries, setInitialEntries] = useState<ChatEntry[]>([]);
   const [loadingHistory, setLoadingHistory] = useState(false);
+  const [documents, setDocuments] = useState<DocumentRecord[]>([]);
 
   const user = USERS[userKey];
 
   // Switching user means the conversation list (and any selected conversation) is stale.
-  useEffect(() => { setActiveConv(null); setInitialEntries([]); }, [userKey]);
+  useEffect(() => { setActiveConv(null); setInitialEntries([]); setDocuments([]); }, [userKey]);
+
+  const loadDocuments = useCallback(async () => {
+    const items = await fetchDocuments(user.token);
+    setDocuments(items);
+  }, [user.token]);
+
+  useEffect(() => {
+    void loadDocuments();
+  }, [loadDocuments]);
 
   const selectConversation = useCallback(async (conv: Conversation) => {
     setActiveConv(conv);
     setLoadingHistory(true);
     try {
-      const res = await fetch(`${BASE}/api/conversations/${conv.id}/messages`, {
+      const res = await fetch(`${API_BASE}/api/conversations/${conv.id}/messages`, {
         headers: { Authorization: `Bearer ${user.token}` },
       });
       const messages: StoredMessage[] = res.ok ? await res.json() : [];
@@ -89,12 +90,12 @@ export default function HomePage() {
   function persistExchange(userText: string, assistantText: string) {
     if (!activeConv) return;
     const headers = { "Content-Type": "application/json", Authorization: `Bearer ${user.token}` };
-    void fetch(`${BASE}/api/conversations/${activeConv.id}/messages`, {
+    void fetch(`${API_BASE}/api/conversations/${activeConv.id}/messages`, {
       method: "POST",
       headers,
       body: JSON.stringify({ role: "user", content: userText }),
     });
-    void fetch(`${BASE}/api/conversations/${activeConv.id}/messages`, {
+    void fetch(`${API_BASE}/api/conversations/${activeConv.id}/messages`, {
       method: "POST",
       headers,
       body: JSON.stringify({ role: "assistant", content: assistantText }),
@@ -103,33 +104,12 @@ export default function HomePage() {
 
   return (
     <div className="flex h-screen flex-col bg-gray-100">
-      <header className="flex items-center justify-between border-b border-gray-200 bg-white px-6 py-3 shadow-sm">
-        <h1 className="text-base font-semibold text-gray-800">Requirement Analysis Assistant</h1>
-        <div className="flex items-center gap-3">
-          <a
-            href="/tests"
-            className="rounded-lg border border-blue-200 px-3 py-1 text-xs text-blue-600 transition-colors hover:bg-blue-50"
-          >
-            Tests
-          </a>
-          <span className="text-gray-200">|</span>
-          <span className="text-xs text-gray-500">Current user:</span>
-          {(Object.keys(USERS) as UserKey[]).map((k) => (
-            <button
-              key={k}
-              onClick={() => setUserKey(k)}
-              className={[
-                "rounded-full px-3 py-1 text-xs font-medium transition-colors",
-                userKey === k
-                  ? "bg-blue-600 text-white"
-                  : "border border-gray-300 bg-white text-gray-600 hover:bg-gray-50",
-              ].join(" ")}
-            >
-              {USERS[k].name}
-            </button>
-          ))}
-        </div>
-      </header>
+      <AppHeader
+        active="chat"
+        userKey={userKey}
+        onUserKeyChange={setUserKey}
+        documentCount={documents.length}
+      />
 
       <main className="flex flex-1 overflow-hidden">
         <ConversationSidebar
@@ -140,28 +120,56 @@ export default function HomePage() {
           onDeleted={handleDeleted}
         />
 
-        <div className="flex-1 overflow-hidden p-6">
-          <div className="mx-auto h-full w-full max-w-2xl">
-            {!activeConv && (
-              <div className="flex h-full items-center justify-center text-sm text-gray-400">
-                在左侧新建或选择一个会话开始
-              </div>
-            )}
-            {activeConv && !loadingHistory && (
-              <AIChatContainer
-                key={activeConv.id}
+        <div className="flex-1 overflow-y-auto p-6">
+          <div className="mx-auto grid min-h-full w-full max-w-6xl gap-6 lg:grid-cols-[minmax(0,1fr)_360px]">
+            <div className="min-h-[680px] overflow-hidden">
+              {!activeConv && (
+                <div className="flex h-full items-center justify-center rounded-2xl border border-gray-200 bg-white text-sm text-gray-400">
+                  请从左侧选择或新建一个会话
+                </div>
+              )}
+              {activeConv && !loadingHistory && (
+                <AIChatContainer
+                  key={activeConv.id}
+                  token={user.token}
+                  title={`需求分析助手 · ${user.name}`}
+                  sessionId={activeConv.id}
+                  initialEntries={initialEntries}
+                  onExchange={persistExchange}
+                />
+              )}
+              {activeConv && loadingHistory && (
+                <div className="flex h-full items-center justify-center rounded-2xl border border-gray-200 bg-white text-sm text-gray-400">
+                  正在加载会话历史
+                </div>
+              )}
+            </div>
+
+            <aside className="space-y-4">
+              <DocumentDropzone
                 token={user.token}
-                title={`Requirement Analysis Assistant · ${user.name}`}
-                sessionId={activeConv.id}
-                initialEntries={initialEntries}
-                onExchange={persistExchange}
+                onUploaded={(doc) => {
+                  setDocuments((prev) => [doc, ...prev.filter((item) => item.id !== doc.id)]);
+                  void loadDocuments();
+                }}
               />
-            )}
-            {activeConv && loadingHistory && (
-              <div className="flex h-full items-center justify-center text-sm text-gray-400">
-                正在加载会话历史…
-              </div>
-            )}
+              <DocumentSearchPanel token={user.token} />
+              <TaskNotifications token={user.token} onTaskEvent={() => void loadDocuments()} />
+              <section className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <h2 className="text-sm font-semibold text-gray-800">最近文件</h2>
+                  <a href="/documents" className="text-xs font-medium text-blue-700 hover:text-blue-800">
+                    查看全部
+                  </a>
+                </div>
+                <DocumentList
+                  token={user.token}
+                  documents={documents.slice(0, 5)}
+                  compact
+                  onChanged={() => void loadDocuments()}
+                />
+              </section>
+            </aside>
           </div>
         </div>
       </main>

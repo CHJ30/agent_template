@@ -82,6 +82,14 @@ export class DocumentController {
     return this.documentService.findByUser(user.userId);
   }
 
+  @Get(':id/chunks')
+  findChunks(
+    @CurrentUser() user: { userId: string },
+    @Param('id') id: string,
+  ) {
+    return this.documentService.findChunks(id, user.userId);
+  }
+
   @Get(':id')
   findOne(
     @CurrentUser() user: { userId: string },

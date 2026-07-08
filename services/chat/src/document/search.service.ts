@@ -6,6 +6,9 @@ interface ChunkRow {
   id: string;
   content: string;
   documentId: string;
+  filename: string;
+  mimeType: string;
+  chunkIndex: number;
   score: number;
 }
 
@@ -13,6 +16,9 @@ export interface SearchResult {
   id: string;
   content: string;
   documentId: string;
+  filename: string;
+  mimeType: string;
+  chunkIndex: number;
   score: number;
 }
 
@@ -38,6 +44,9 @@ export class SearchService {
         dc.id,
         dc.content,
         dc."documentId",
+        dc."chunkIndex",
+        d.filename,
+        d."mimeType",
         (1 - (dc.embedding <=> ${vectorStr}::vector))::float8 AS score
       FROM document_chunks dc
       JOIN documents d ON d.id = dc."documentId"

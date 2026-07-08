@@ -132,6 +132,23 @@ export interface ActionButtonsComponent {
   layout?: 'horizontal' | 'vertical';
 }
 
+export interface DocumentResultItem {
+  chunkId: string;
+  documentId: string;
+  filename: string;
+  snippet: string;
+  score: number;
+  chunkIndex?: number;
+  mimeType?: string;
+}
+
+export interface DocumentResultsComponent {
+  type: 'document_results';
+  id: string;
+  title?: string;
+  items: DocumentResultItem[];
+}
+
 // ─── Union ───────────────────────────────────────────────────────────────────
 
 export type UIComponent =
@@ -142,7 +159,8 @@ export type UIComponent =
   | CardComponent
   | StepsComponent
   | TableComponent
-  | ActionButtonsComponent;
+  | ActionButtonsComponent
+  | DocumentResultsComponent;
 
 // ─── AI response wrapper ─────────────────────────────────────────────────────
 
