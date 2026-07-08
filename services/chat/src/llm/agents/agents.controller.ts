@@ -1,11 +1,23 @@
-import { Controller, Post, Body, Get, Res } from '@nestjs/common';
+import { Controller, Post, Body, Get, Param, NotFoundException, Res } from '@nestjs/common';
 import type { Response } from 'express';
 import { OrchestratorService, TEST_CASES, ANALYSIS_TEST_CASES, SUPERVISOR_TEST_CASES } from './orchestrator.service.js';
 import type { UIResponse, StreamEnvelope } from './orchestrator.service.js';
+import { RequirementReportService } from './requirement-report.service.js';
 
 @Controller('api/agents')
 export class AgentsController {
-  constructor(private readonly orchestratorService: OrchestratorService) {}
+  constructor(
+    private readonly orchestratorService: OrchestratorService,
+    private readonly requirementReportService: RequirementReportService,
+  ) {}
+
+  /** Fetches a previously generated + persisted requirement report by id. */
+  @Get('report/:reportId')
+  async getReport(@Param('reportId') reportId: string) {
+    const report = await this.requirementReportService.findById(reportId.toUpperCase());
+    if (!report) throw new NotFoundException(`Report ${reportId} not found`);
+    return report;
+  }
 
   @Post('orchestrate')
   orchestrate(@Body() body: { input: string; skipClarification?: boolean }) {

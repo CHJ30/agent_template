@@ -1,6 +1,8 @@
 "use client";
 import { Suspense, useState, useEffect, useRef } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -15,7 +17,25 @@ interface Message {
   content: string;
 }
 
+interface RequirementReport {
+  id: string;
+  input: string;
+  extracted?: string | null;
+  analysisResult?: string | null;
+  risk?: string | null;
+  summary: string;
+  status: string;
+  createdAt: string;
+}
+
 // ─── API helpers ──────────────────────────────────────────────────────────────
+
+async function fetchReport(reqId: string): Promise<RequirementReport> {
+  const res = await fetch(`/api/agents/report/${encodeURIComponent(reqId)}`);
+  if (res.status === 404) throw new Error(`未找到需求报告 ${reqId}，可能尚未生成完成或已过期`);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
 
 async function createConversation(token: string, title: string): Promise<string> {
   const res = await fetch("/api/conversations", {
@@ -47,6 +67,8 @@ function ReportPageInner() {
   const reqId = searchParams.get("reqId") ?? "";
 
   const [token] = useState<string>(FALLBACK_TOKEN);
+  const tokenRef = useRef<string>(token);
+  const [report, setReport] = useState<RequirementReport | null>(null);
   const [convId, setConvId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
@@ -55,35 +77,21 @@ function ReportPageInner() {
   const bottomRef = useRef<HTMLDivElement>(null);
   const initialized = useRef(false);
 
-  // Read token from sessionStorage and initialize conversation
+  // Fetch the already-generated, persisted report — no LLM call on page load.
   useEffect(() => {
     if (initialized.current) return;
     initialized.current = true;
 
     const storedToken = sessionStorage.getItem("report_token") ?? FALLBACK_TOKEN;
-    // Patch token into closure via ref so the sendChat calls below use the right one
     tokenRef.current = storedToken;
 
     async function init() {
       setLoading(true);
       setError(null);
       try {
-        const id = await createConversation(
-          storedToken,
-          `需求分析报告 · ${reqId || "未知需求"}`,
-        );
-        setConvId(id);
-
-        const prompt = reqId
-          ? `请为需求编号 ${reqId} 生成完整的需求分析报告，包括：需求解析、功能拆解、依赖识别、工作量估算、风险识别和落地建议。`
-          : "请生成一份需求分析报告模板，并介绍你的分析能力。";
-
-        const content = await sendChat(storedToken, id, prompt);
-
-        setMessages([
-          { id: "init-user", role: "user", content: prompt },
-          { id: "init-ai", role: "assistant", content },
-        ]);
+        if (!reqId) throw new Error("缺少需求编号（reqId）");
+        const r = await fetchReport(reqId);
+        setReport(r);
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
       } finally {
@@ -95,17 +103,16 @@ function ReportPageInner() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Keep a ref so the async callbacks can access the current token
-  const tokenRef = useRef<string>(token);
-
-  // Scroll to bottom on new messages
+  // Scroll to bottom on new follow-up messages
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, loading]);
 
+  // Follow-up Q&A about the report uses the normal conversation chat endpoint,
+  // lazily creating a conversation on first question.
   async function handleSend() {
     const text = input.trim();
-    if (!text || !convId || loading) return;
+    if (!text || loading) return;
     setInput("");
     setLoading(true);
     setError(null);
@@ -114,11 +121,14 @@ function ReportPageInner() {
     setMessages((prev) => [...prev, userMsg]);
 
     try {
-      const content = await sendChat(tokenRef.current, convId, text);
-      setMessages((prev) => [
-        ...prev,
-        { id: `a-${Date.now()}`, role: "assistant", content },
-      ]);
+      let id = convId;
+      if (!id) {
+        id = await createConversation(tokenRef.current, `需求分析追问 · ${reqId || "未知需求"}`);
+        setConvId(id);
+      }
+      const context = report ? `以下是需求 ${reqId} 的分析报告，供参考：\n\n${report.summary}\n\n用户问题：${text}` : text;
+      const content = await sendChat(tokenRef.current, id, context);
+      setMessages((prev) => [...prev, { id: `a-${Date.now()}`, role: "assistant", content }]);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -140,12 +150,12 @@ function ReportPageInner() {
           <h1 className="text-sm font-semibold text-gray-800">需求分析报告</h1>
           {reqId && <p className="text-xs text-gray-400">{reqId}</p>}
         </div>
-        {loading && messages.length === 0 && (
-          <span className="text-xs text-gray-400">生成中…</span>
+        {loading && !report && (
+          <span className="text-xs text-gray-400">加载中…</span>
         )}
       </header>
 
-      {/* Messages */}
+      {/* Report + follow-up Q&A */}
       <div className="flex-1 overflow-y-auto px-4 py-6">
         <div className="mx-auto max-w-3xl space-y-6">
           {error && (
@@ -154,7 +164,7 @@ function ReportPageInner() {
             </div>
           )}
 
-          {loading && messages.length === 0 && (
+          {loading && !report && !error && (
             <div className="flex justify-center py-16">
               <div className="flex items-center gap-2 text-sm text-gray-400">
                 <span className="flex gap-1">
@@ -162,7 +172,15 @@ function ReportPageInner() {
                   <span className="animate-bounce [animation-delay:150ms]">●</span>
                   <span className="animate-bounce [animation-delay:300ms]">●</span>
                 </span>
-                <span>正在生成分析报告…</span>
+                <span>正在加载分析报告…</span>
+              </div>
+            </div>
+          )}
+
+          {report && (
+            <div className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm">
+              <div className="prose prose-sm max-w-none prose-headings:font-semibold prose-headings:text-gray-800 prose-p:text-gray-700 prose-li:text-gray-700">
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{report.summary}</ReactMarkdown>
               </div>
             </div>
           )}
@@ -179,18 +197,24 @@ function ReportPageInner() {
               )}
               <div
                 className={[
-                  "max-w-[80%] rounded-2xl px-4 py-3 text-sm leading-relaxed whitespace-pre-wrap",
+                  "max-w-[80%] rounded-2xl px-4 py-3 text-sm leading-relaxed",
                   msg.role === "user"
-                    ? "rounded-tr-sm bg-blue-600 text-white"
+                    ? "rounded-tr-sm bg-blue-600 text-white whitespace-pre-wrap"
                     : "rounded-tl-sm border border-gray-200 bg-white text-gray-800 shadow-sm",
                 ].join(" ")}
               >
-                {msg.content}
+                {msg.role === "assistant" ? (
+                  <div className="prose prose-sm max-w-none">
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
+                  </div>
+                ) : (
+                  msg.content
+                )}
               </div>
             </div>
           ))}
 
-          {loading && messages.length > 0 && (
+          {loading && (report || messages.length > 0) && (
             <div className="flex items-start gap-3">
               <div className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full bg-blue-600 text-xs font-bold text-white">
                 AI
@@ -221,18 +245,14 @@ function ReportPageInner() {
                 void handleSend();
               }
             }}
-            placeholder={
-              convId
-                ? "追问或补充意见… Enter 发送，Shift+Enter 换行"
-                : "正在初始化对话…"
-            }
+            placeholder="针对该报告追问或补充意见… Enter 发送，Shift+Enter 换行"
             rows={2}
-            disabled={loading || !convId}
+            disabled={loading}
             className="flex-1 resize-none rounded-xl border border-gray-300 px-3 py-2 text-sm text-gray-800 placeholder-gray-400 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:opacity-60"
           />
           <button
             onClick={() => void handleSend()}
-            disabled={loading || !convId || !input.trim()}
+            disabled={loading || !input.trim()}
             className="self-end rounded-xl bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-blue-300"
           >
             发送
