@@ -38,6 +38,9 @@ interface Props {
   sessionId?: string;
 }
 
+// Quick-input shortcuts shown above the text box — clicking one sends it immediately.
+const QUICK_PROMPTS = ['我需要一个todo需求', '今天天气怎么样，300字小作文'];
+
 // ─── API helpers ──────────────────────────────────────────────────────────────
 
 const BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "";
@@ -71,6 +74,7 @@ export function AIChatContainer({ token, title = "需求分析助手", sessionId
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [lastReportId, setLastReportId] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   // Track the index of the last assistant entry so only its components are interactive
   const lastAssistantIdx = entries.reduce<number>(
@@ -162,6 +166,7 @@ export function AIChatContainer({ token, title = "需求分析助手", sessionId
           intent: ev.intent ?? e.intent,
           progress: 100,
         }));
+        if (ev.reportId) setLastReportId(ev.reportId);
         return;
 
       case "error":
@@ -171,12 +176,20 @@ export function AIChatContainer({ token, title = "需求分析助手", sessionId
     }
   }
 
-  async function handleSend() {
-    const text = input.trim();
+  async function handleSend(
+    overrideText?: string,
+    options?: { sendText?: string; skipClarification?: boolean },
+  ) {
+    const text = (overrideText ?? input).trim();
     if (!text || loading) return;
-    setInput("");
+    if (!overrideText) setInput("");
     setError(null);
     addEntry({ id: crypto.randomUUID(), role: "user", text });
+
+    // sendText carries the full context (original requirement + clarification
+    // answers) to the backend, while `text` is what's shown in the user's chat
+    // bubble — they can differ (see the clarify-form submit handler below).
+    const sendText = options?.sendText ?? text;
 
     const assistantId = crypto.randomUUID();
     const mdId = `md-${assistantId}`;
@@ -192,8 +205,9 @@ export function AIChatContainer({ token, title = "需求分析助手", sessionId
     setLoading(true);
     try {
       for await (const ev of streamOrchestrate(`${BASE}/api/agents/orchestrate-stream`, {
-        input: text,
+        input: sendText,
         sessionId,
+        skipClarification: options?.skipClarification ?? false,
       })) {
         applyStreamEvent(assistantId, mdId, ev);
       }
@@ -211,6 +225,40 @@ export function AIChatContainer({ token, title = "需求分析助手", sessionId
       sessionStorage.setItem("report_token", token);
       const reqId = (action.payload["reqId"] as string | undefined) ?? "";
       router.push(`/report?reqId=${encodeURIComponent(reqId)}`);
+      return;
+    }
+
+    // Clarify form: assemble Q&A, prepend the original requirement text (so
+    // the backend keeps full context instead of reclassifying the bare Q&A
+    // answers as a brand-new, unrelated message — e.g. mistaking it for chat),
+    // and re-run orchestration via streaming with clarification skipped.
+    if (action.actionType === "form_submit" && action.componentId.startsWith("form-clarify-")) {
+      const assistantIdx = entries.findIndex(
+        (e) => e.role === "assistant" && e.components.some((c) => c.id === action.componentId),
+      );
+      const component =
+        assistantIdx !== -1
+          ? (entries[assistantIdx] as AssistantEntry).components.find((c) => c.id === action.componentId)
+          : undefined;
+      const payload = action.payload as Record<string, string>;
+      const answerText =
+        component && component.type === "form"
+          ? component.fields
+              .map((f) => `${f.label}\n${payload[f.name] ?? ""}`)
+              .join("\n\n")
+          : Object.values(payload).filter(Boolean).join("\n");
+
+      let originalText = "";
+      for (let i = assistantIdx - 1; i >= 0; i--) {
+        const e = entries[i];
+        if (e.role === "user") {
+          originalText = e.text;
+          break;
+        }
+      }
+      const sendText = originalText ? `${originalText}\n\n补充信息：\n${answerText}` : answerText;
+
+      await handleSend(answerText, { sendText, skipClarification: true });
       return;
     }
 
@@ -333,6 +381,29 @@ export function AIChatContainer({ token, title = "需求分析助手", sessionId
 
       {/* Input */}
       <div className="border-t border-gray-200 bg-white px-4 py-3">
+        <div className="mb-2 flex flex-wrap gap-2">
+          {QUICK_PROMPTS.map((prompt) => (
+            <button
+              key={prompt}
+              type="button"
+              onClick={() => void handleSend(prompt)}
+              disabled={loading}
+              className="rounded-full border border-gray-300 bg-gray-50 px-3 py-1 text-xs text-gray-600 hover:border-blue-400 hover:bg-blue-50 hover:text-blue-600 disabled:opacity-50"
+            >
+              {prompt}
+            </button>
+          ))}
+          {lastReportId && (
+            <button
+              type="button"
+              onClick={() => void handleSend(`查询 ${lastReportId} 的状态`)}
+              disabled={loading}
+              className="rounded-full border border-gray-300 bg-gray-50 px-3 py-1 text-xs text-gray-600 hover:border-blue-400 hover:bg-blue-50 hover:text-blue-600 disabled:opacity-50"
+            >
+              查询 {lastReportId}
+            </button>
+          )}
+        </div>
         <div className="flex gap-2">
           <textarea
             value={input}
@@ -346,9 +417,16 @@ export function AIChatContainer({ token, title = "需求分析助手", sessionId
           <button
             onClick={() => void handleSend()}
             disabled={loading || !input.trim()}
-            className="self-end rounded-xl bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-blue-300"
+            className="flex min-w-[72px] items-center justify-center gap-1.5 self-end rounded-xl bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-blue-300"
           >
-            发送
+            {loading ? (
+              <span
+                aria-label="发送中"
+                className="h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white"
+              />
+            ) : (
+              "发送"
+            )}
           </button>
         </div>
       </div>

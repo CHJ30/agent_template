@@ -11,6 +11,7 @@ import { VectorStoreService } from './embedding/vector-store.service.js';
 import { EmbeddingController } from './embedding/embedding.controller.js';
 import { OrchestratorService } from './agents/orchestrator.service.js';
 import { AgentsController } from './agents/agents.controller.js';
+import { RequirementReportService } from './agents/requirement-report.service.js';
 import { AdvancedAnalysisService } from './advanced-analysis.service.js';
 import { AdvancedController } from './advanced.controller.js';
 import { UIResponseService } from './ui-protocol/ui-response.service.js';
@@ -36,6 +37,7 @@ import { LLM_CONFIG } from './llm.constants.js';
     VectorStoreService,
     FilesystemService,
     OrchestratorService,
+    RequirementReportService,
     AdvancedAnalysisService,
     UIResponseService,
     UIFlowService,

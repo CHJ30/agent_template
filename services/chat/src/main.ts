@@ -35,4 +35,11 @@ async function bootstrap() {
   await app.listen(port);
   log.info({ port }, 'bootstrap_listening');
 }
-bootstrap();
+bootstrap().catch((err) => {
+  // A rejection here means the app never started listening (e.g. a module's
+  // onModuleInit threw). Without this, the failure silently vanished into
+  // the unhandledRejection handler above, leaving a zombie process with no
+  // server actually listening on the port.
+  log.error({ err: err instanceof Error ? err.message : String(err) }, 'bootstrap_failed');
+  process.exit(1);
+});

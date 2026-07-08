@@ -4,9 +4,10 @@ import { LLM_CONFIG } from '../llm.constants.js';
 import type { LlmConfig } from '../model.factory.js';
 import { HumanMessage } from '@langchain/core/messages';
 import { createChatModel } from '../model.factory.js';
-import { runAnalysisGraph, createAnalysisGraph, keywordClassify } from '../graph/requirement-analysis-graph.js';
+import { runAnalysisGraph, createAnalysisGraph, keywordClassify, REQ_ID_RE } from '../graph/requirement-analysis-graph.js';
 import type { RequirementState } from '../graph/requirement-analysis-graph.js';
 import { createAnalysisSupervisorSubGraph } from '../graph/experts.js';
+import { RequirementReportService } from './requirement-report.service.js';
 import { TEST_CASES, runTestCase } from '../graph/test-graph.js';
 import type { TestCaseResult } from '../graph/test-graph.js';
 import {
@@ -146,6 +147,16 @@ const NEXT_NODE: Record<string, string | null> = {
 // only its start/end lifecycle and progress are surfaced.
 const MARKDOWN_NODES = new Set(['summaryStep', 'queryHandler', 'chatHandler']);
 
+// Always shown after extraction (see clarify-form branch below) when the
+// clarify step's own model call returned no usable questions — every
+// requirement gets at least one round of confirmation before analysis runs.
+const DEFAULT_CLARIFY_QUESTIONS = [
+  '目标用户是谁？',
+  '核心功能点有哪些？',
+  '是否有明确的约束条件（性能、安全、合规等）？',
+  '优先级是什么（P0/P1/P2/P3）？',
+];
+
 function totalStepsForIntent(intent: 'analyze' | 'query' | 'chat'): number {
   // analyze: classifier → extract → clarify → analysis → risk → summary (6)
   // query/chat: classifier → handler (2)
@@ -200,7 +211,10 @@ function parseJson(text: string): any {
 export class OrchestratorService {
   private readonly model: ChatOpenAI;
 
-  constructor(@Inject(LLM_CONFIG) config: LlmConfig) {
+  constructor(
+    @Inject(LLM_CONFIG) config: LlmConfig,
+    private readonly requirementReportService: RequirementReportService,
+  ) {
     this.model = createChatModel(config);
   }
 
@@ -280,6 +294,16 @@ export class OrchestratorService {
       const seq = String(Math.floor(Math.random() * 900) + 100);
       const reportId = `REQ-${dateStr}-${seq}`;
       const expertAnalyses = buildExpertAnalyses(state as RequirementState);
+      if (!hasNodeErrors) {
+        void this.requirementReportService.save({
+          reportId,
+          input,
+          extracted:      state.extracted,
+          analysisResult: state.analysisResult,
+          risk:           state.risk,
+          summary:        state.summary ?? '',
+        });
+      }
       return {
         mode: 'fixed',
         status: hasNodeErrors ? 'failed' : 'completed',
@@ -334,9 +358,22 @@ export class OrchestratorService {
       yield { messageType: 'agent_start', agent: 'classifier', label: AGENT_LABELS.classifier };
       nodeTracer.nodeStarted(requestId, 'classifier');
 
+      // A query-intent message referencing a known report ID gets the real,
+      // previously persisted report content injected so queryHandler answers
+      // from actual data instead of asking the LLM to fabricate a plausible one.
+      let augmentedInput = input;
+      const reqIdMatch = input.match(REQ_ID_RE);
+      if (reqIdMatch && intent === 'query') {
+        const report = await this.requirementReportService.findById(reqIdMatch[0].toUpperCase());
+        if (report) {
+          augmentedInput =
+            `${input}\n\n[系统内部数据 - 该需求的完整分析报告，请基于此回答用户问题]:\n${report.summary}`;
+        }
+      }
+
       const app = createAnalysisGraph(this.model);
       const stream = await app.stream(
-        { messages: [new HumanMessage(input)], skipClarification },
+        { messages: [new HumanMessage(augmentedInput)], skipClarification },
         { streamMode: 'updates' },
       );
 
@@ -372,13 +409,50 @@ export class OrchestratorService {
         yield { messageType: 'agent_end', agent: nodeName, label: AGENT_LABELS[nodeName] ?? nodeName };
         yield { messageType: 'progress', progress: Math.min(99, Math.round((completedSteps / totalSteps) * 100)) };
 
+        // ── requirement extraction result ───────────────────────────────────
+        if (nodeName === 'extractStep') {
+          const extracted = parseJson(update.extracted ?? '');
+          if (extracted) {
+            const extractPromptText = '已为您提取以下需求信息：';
+            persistedContent += extractPromptText;
+            yield { messageType: 'markdown', isChunk: true, content: extractPromptText };
+
+            const fields: Array<{ label: string; value: string }> = [];
+            if (extracted.coreAction) fields.push({ label: '核心动作', value: String(extracted.coreAction) });
+            if (Array.isArray(extracted.targetUsers) && extracted.targetUsers.length)
+              fields.push({ label: '目标用户', value: extracted.targetUsers.join('、') });
+            if (Array.isArray(extracted.functionalPoints) && extracted.functionalPoints.length)
+              fields.push({ label: '功能点', value: extracted.functionalPoints.join('；') });
+            if (Array.isArray(extracted.constraints) && extracted.constraints.length)
+              fields.push({ label: '约束条件', value: extracted.constraints.join('；') });
+            if (Array.isArray(extracted.keywords) && extracted.keywords.length)
+              fields.push({ label: '关键词', value: extracted.keywords.join('、') });
+
+            yield {
+              messageType: 'ui',
+              component: {
+                type: 'card',
+                id: `card-extract-${Date.now()}`,
+                title: extracted.title ? String(extracted.title) : '需求提取结果',
+                subtitle: extracted.scope ? String(extracted.scope) : undefined,
+                fields,
+              },
+            };
+          }
+        }
+
         // ── needs_clarification short-circuit ──────────────────────────────
+        // Every requirement gets at least one clarification round before
+        // analysis runs — we don't gate this on the clarify step's own
+        // needsClarification judgment, since a vague input (e.g. "我要一个
+        // todo需求") can still produce a JSON blob that *looks* complete
+        // (the extract step fills every field, even generically), fooling
+        // that judgment into skipping clarification entirely.
         if (nodeName === 'clarifyStep' && !skipClarification) {
           const parsed = parseJson(update.clarified ?? '');
-          if (parsed?.needsClarification === true) {
-            clarifyQuestions = Array.isArray(parsed.questions) ? parsed.questions : [];
-            break;
-          }
+          const questions = Array.isArray(parsed?.questions) ? parsed.questions.filter(Boolean) : [];
+          clarifyQuestions = questions.length ? questions : DEFAULT_CLARIFY_QUESTIONS;
+          break;
         }
 
         // ── terminal, user-facing node reached ─────────────────────────────
@@ -398,14 +472,25 @@ export class OrchestratorService {
 
       // ── needs_clarification path ────────────────────────────────────────────
       if (clarifyQuestions) {
+        const clarifyPromptText = '为了更准确地分析您的需求，请补充以下信息：';
+        persistedContent += clarifyPromptText;
+        yield { messageType: 'markdown', isChunk: true, content: clarifyPromptText };
         yield {
           messageType: 'ui',
           component: {
-            type: 'card',
-            id: `card-clarify-${Date.now()}`,
+            type: 'form',
+            id: `form-clarify-${Date.now()}`,
             title: '需要补充信息',
-            subtitle: '请在对话框中补充以下问题后重新提交',
-            fields: clarifyQuestions.map((q, i) => ({ label: `Q${i + 1}`, value: q })),
+            description: '请回答以下问题，以便更好地分析您的需求',
+            fields: clarifyQuestions.map((q, i) => ({
+              name: `q${i}`,
+              label: q,
+              fieldType: 'textarea',
+              required: false,
+              rows: 2,
+              placeholder: '请在此输入您的回答…',
+            })),
+            submitLabel: '提交补充信息',
           },
         };
         nodeTracer.endRequest(requestId, 'needs_clarification');
@@ -442,6 +527,24 @@ export class OrchestratorService {
         const seq = String(Math.floor(Math.random() * 900) + 100);
         const reportId = `REQ-${dateStr}-${seq}`;
 
+        // Fire-and-forget: persist so a later query-intent message (e.g.
+        // "查询 REQ-... 的状态") can look up the real report. Never awaited —
+        // a slow/unreachable DB must not delay the SSE 'done' event, and
+        // save() already swallows its own errors.
+        if (!hasNodeErrors) {
+          void this.requirementReportService.save({
+            reportId,
+            input,
+            extracted:      finalState.extracted,
+            analysisResult: finalState.analysisResult,
+            risk:           finalState.risk,
+            summary:        finalState.summary ?? '',
+          });
+        }
+
+        const reportPromptText = '\n\n您可以点击下方按钮查看完整的分析报告：';
+        persistedContent += reportPromptText;
+        yield { messageType: 'markdown', isChunk: true, content: reportPromptText };
         yield {
           messageType: 'ui',
           component: {
