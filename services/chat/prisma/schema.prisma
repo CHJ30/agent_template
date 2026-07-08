@@ -58,12 +58,15 @@ model documents {
 }
 
 model document_chunks {
-  id         String                 @id @default(cuid())
+  id         String                    @id @default(cuid())
   documentId String
-  document   documents              @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  document   documents                 @relation(fields: [documentId], references: [id], onDelete: Cascade)
   content    String
   chunkIndex Int
-  embedding  Unsupported("vector")?
+  // Fixed at 384 dims (Xenova/paraphrase-multilingual-MiniLM-L12-v2's output
+  // size) so Postgres itself rejects any future insert with a mismatched
+  // dimension instead of failing later at query time inside a <=> comparison.
+  embedding  Unsupported("vector(384)")?
 }
 
 model task_events {

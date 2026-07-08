@@ -129,6 +129,23 @@ export const actionButtonsComponentSchema = z.object({
   layout: z.enum(['horizontal', 'vertical']).optional(),
 });
 
+export const documentResultItemSchema = z.object({
+  chunkId: z.string(),
+  documentId: z.string(),
+  filename: z.string(),
+  snippet: z.string(),
+  score: z.number(),
+  chunkIndex: z.number().optional(),
+  mimeType: z.string().optional(),
+});
+
+export const documentResultsComponentSchema = z.object({
+  type: z.literal('document_results'),
+  id: z.string(),
+  title: z.string().optional(),
+  items: z.array(documentResultItemSchema),
+});
+
 // ─── Discriminated union ──────────────────────────────────────────────────────
 
 export const uiResponseSchema = z.discriminatedUnion('type', [
@@ -140,6 +157,7 @@ export const uiResponseSchema = z.discriminatedUnion('type', [
   stepsComponentSchema,
   tableComponentSchema,
   actionButtonsComponentSchema,
+  documentResultsComponentSchema,
 ]);
 
 // ─── Full AI response (used with withStructuredOutput) ────────────────────────

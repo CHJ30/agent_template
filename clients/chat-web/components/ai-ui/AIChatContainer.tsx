@@ -31,15 +31,23 @@ interface AssistantEntry {
 }
 
 type ChatEntry = UserEntry | AssistantEntry;
+export type { ChatEntry, UserEntry, AssistantEntry };
 
 interface Props {
   token: string;
   title?: string;
   sessionId?: string;
+  // Pre-existing messages to hydrate the chat with (e.g. when switching to a
+  // previously saved conversation). Only read once, on mount.
+  initialEntries?: ChatEntry[];
+  // Fired once per completed exchange (after the SSE stream's 'done' event)
+  // with the user's text and the assistant's full markdown reply, so the
+  // parent page can persist it (e.g. POST /api/conversations/:id/messages).
+  onExchange?: (userText: string, assistantText: string) => void;
 }
 
 // Quick-input shortcuts shown above the text box — clicking one sends it immediately.
-const QUICK_PROMPTS = ['我需要一个todo需求', '今天天气怎么样，300字小作文', '查询需求REQ-20260708-247'];
+const QUICK_PROMPTS = ['我要找蔡鸿键的简历', '我需要一个todo需求', '今天天气怎么样，300字小作文', '查询需求REQ-20260708-247'];
 
 // ─── API helpers ──────────────────────────────────────────────────────────────
 
@@ -62,15 +70,48 @@ async function postAction(
   return normalizeAIUIResponse(await res.json());
 }
 
+async function searchFiles(token: string, query: string): Promise<AIUIResponse> {
+  const res = await fetch(`${BASE}/api/search/ui`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({ query, topK: 8 }),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return normalizeAIUIResponse(await res.json());
+}
+
+function extractFileSearchQuery(text: string): string | null {
+  const normalized = text.trim();
+  const patterns = [
+    /^在文件(?:中|里)?(?:查找|搜索|找)\s*[:：]?\s*(.+)$/u,
+    /^我要找\s*[:：]?\s*(.+)$/u,
+  ];
+  for (const pattern of patterns) {
+    const match = normalized.match(pattern);
+    const query = match?.[1]?.trim();
+    if (query) return query;
+  }
+  return null;
+}
+
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export function AIChatContainer({ token, title = "需求分析助手", sessionId: propSessionId }: Props) {
+export function AIChatContainer({
+  token,
+  title = "需求分析助手",
+  sessionId: propSessionId,
+  initialEntries,
+  onExchange,
+}: Props) {
   const router = useRouter();
   // Use the shared sessionId from the parent page if provided; otherwise generate one.
   const [localSessionId, setLocalSessionId] = useState<string>('');
   useEffect(() => { if (!propSessionId) setLocalSessionId(crypto.randomUUID()); }, [propSessionId]);
   const sessionId = propSessionId || localSessionId;
-  const [entries, setEntries] = useState<ChatEntry[]>([]);
+  const [entries, setEntries] = useState<ChatEntry[]>(() => initialEntries ?? []);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -190,6 +231,37 @@ export function AIChatContainer({ token, title = "需求分析助手", sessionId
     // answers) to the backend, while `text` is what's shown in the user's chat
     // bubble — they can differ (see the clarify-form submit handler below).
     const sendText = options?.sendText ?? text;
+    const fileSearchQuery = !options?.skipClarification ? extractFileSearchQuery(sendText) : null;
+
+    if (fileSearchQuery) {
+      const assistantId = crypto.randomUUID();
+      addEntry({
+        id: assistantId,
+        role: "assistant",
+        components: [],
+        intent: "document_search",
+        progress: 0,
+        streaming: true,
+      });
+      setLoading(true);
+      try {
+        const res = await searchFiles(token, fileSearchQuery);
+        updateAssistant(assistantId, (entry) => ({
+          ...entry,
+          components: res.components,
+          intent: res.intent ?? "document_search",
+          progress: 100,
+          streaming: false,
+        }));
+        onExchange?.(text, `已在文件库中查找：${fileSearchQuery}`);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+        updateAssistant(assistantId, (entry) => ({ ...entry, streaming: false }));
+      } finally {
+        setLoading(false);
+      }
+      return;
+    }
 
     const assistantId = crypto.randomUUID();
     const mdId = `md-${assistantId}`;
@@ -204,13 +276,16 @@ export function AIChatContainer({ token, title = "需求分析助手", sessionId
 
     setLoading(true);
     try {
+      let finalContent = "";
       for await (const ev of streamOrchestrate(`${BASE}/api/agents/orchestrate-stream`, {
         input: sendText,
         sessionId,
         skipClarification: options?.skipClarification ?? false,
       })) {
         applyStreamEvent(assistantId, mdId, ev);
+        if (ev.messageType === "done" && ev.content) finalContent = ev.content;
       }
+      if (finalContent) onExchange?.(text, finalContent);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       updateAssistant(assistantId, (entry) => ({ ...entry, streaming: false }));
@@ -412,7 +487,7 @@ export function AIChatContainer({ token, title = "需求分析助手", sessionId
             placeholder="输入需求描述，Enter 发送，Shift+Enter 换行…"
             rows={2}
             disabled={loading}
-            className="flex-1 resize-none rounded-xl border border-gray-300 px-3 py-2 text-sm text-gray-800 placeholder-gray-400 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:opacity-60"
+            className="h-20 flex-1 resize-none overflow-y-auto rounded-xl border border-gray-300 px-3 py-2 text-sm text-gray-800 placeholder-gray-400 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:opacity-60"
           />
           <button
             onClick={() => void handleSend()}

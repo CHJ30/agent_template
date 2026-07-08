@@ -52,6 +52,12 @@ const TEST_PAGES = [
     href: "/skills-demo",
     description: "Skill loading and tool demo page.",
   },
+  {
+    id: "memory",
+    label: "Memory Test",
+    href: "/memory-test",
+    description: "PostgreSQL-backed conversation memory: session list + multi-turn recall test.",
+  },
 ] as const;
 
 export default function TestsPage() {

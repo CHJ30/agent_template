@@ -11,6 +11,7 @@ const KNOWN_COMPONENT_TYPES = new Set([
   "steps",
   "table",
   "action_buttons",
+  "document_results",
 ]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {

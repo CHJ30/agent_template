@@ -127,6 +127,23 @@ export interface ActionButtonsComponent {
   layout?: 'horizontal' | 'vertical';
 }
 
+export interface DocumentResultItem {
+  chunkId: string;
+  documentId: string;
+  filename: string;
+  snippet: string;
+  score: number;
+  chunkIndex?: number;
+  mimeType?: string;
+}
+
+export interface DocumentResultsComponent {
+  type: 'document_results';
+  id: string;
+  title?: string;
+  items: DocumentResultItem[];
+}
+
 export type UIComponent =
   | TextComponent
   | SelectionComponent
@@ -135,7 +152,8 @@ export type UIComponent =
   | CardComponent
   | StepsComponent
   | TableComponent
-  | ActionButtonsComponent;
+  | ActionButtonsComponent
+  | DocumentResultsComponent;
 
 export interface AIUIResponse {
   version: '1.0';

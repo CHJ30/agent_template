@@ -76,6 +76,19 @@ export class DocumentService {
     return doc;
   }
 
+  async findChunks(documentId: string, userId: string) {
+    await this.findById(documentId, userId);
+    return this.prisma.document_chunks.findMany({
+      where: { documentId },
+      select: {
+        id: true,
+        content: true,
+        chunkIndex: true,
+      },
+      orderBy: { chunkIndex: 'asc' },
+    });
+  }
+
   async delete(documentId: string, userId: string): Promise<void> {
     const doc = await this.findById(documentId, userId);
 

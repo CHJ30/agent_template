@@ -12,6 +12,7 @@ import { CurrentUser } from '../auth/current-user.decorator.js';
 import { ConversationService } from './conversation.service.js';
 import { MessageService } from '../message/message.service.js';
 import { AdvancedAnalysisService } from '../llm/advanced-analysis.service.js';
+import { MessageRole } from '@prisma/client';
 
 @Controller('api/conversations')
 @UseGuards(JwtAuthGuard)
@@ -45,6 +46,21 @@ export class ConversationController {
       .then(() => this.messageService.getHistory(id));
   }
 
+  // Appends a message record without invoking any LLM — used by pages that
+  // generate replies through a different pipeline (e.g. the orchestrator SSE
+  // stream on the main page) but still want the exchange persisted here so
+  // it shows up in the conversation's history / sidebar.
+  @Post(':id/messages')
+  async appendMessage(
+    @CurrentUser() user: { userId: string },
+    @Param('id') id: string,
+    @Body() body: { role: 'user' | 'assistant'; content: string },
+  ) {
+    await this.conversationService.findById(id, user.userId);
+    const role = body.role === 'user' ? MessageRole.USER : MessageRole.ASSISTANT;
+    return this.messageService.addMessage(id, role, body.content);
+  }
+
   @Post(':id/chat')
   async chat(
     @CurrentUser() user: { userId: string },
@@ -65,3 +81,4 @@ export class ConversationController {
     return { ok: true };
   }
 }
+

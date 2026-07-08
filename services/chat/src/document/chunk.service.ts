@@ -6,6 +6,9 @@ import { PrismaService } from '../prisma/prisma.service.js';
 import { LocalEmbeddingService } from './embedding.service.js';
 import { DocumentService } from './document.service.js';
 import { extractText } from './parsers/parser.factory.js';
+import { SseService } from '../sse/sse.service.js';
+
+const TASK_TYPE = 'document_processing';
 
 @Injectable()
 export class ChunkService {
@@ -18,6 +21,7 @@ export class ChunkService {
     private readonly prisma: PrismaService,
     private readonly embeddingService: LocalEmbeddingService,
     private readonly documentService: DocumentService,
+    private readonly sseService: SseService,
   ) {}
 
   async processDocument(documentId: string, userId: string): Promise<void> {
@@ -26,6 +30,12 @@ export class ChunkService {
     await this.prisma.documents.update({
       where: { id: documentId },
       data: { status: 'processing' },
+    });
+    await this.sseService.emit(userId, {
+      taskType: TASK_TYPE,
+      taskId: documentId,
+      status: 'processing',
+      message: '开始解析并分块文档',
     });
 
     try {
@@ -51,12 +61,26 @@ export class ChunkService {
         where: { id: documentId },
         data: { status: 'done', chunkCount: chunks.length },
       });
+      await this.sseService.emit(userId, {
+        taskType: TASK_TYPE,
+        taskId: documentId,
+        status: 'done',
+        message: `处理完成，共生成 ${chunks.length} 个分块`,
+        metadata: { chunkCount: chunks.length },
+      });
     } catch (err) {
       await this.prisma.documents.update({
         where: { id: documentId },
         data: { status: 'error' },
       });
+      await this.sseService.emit(userId, {
+        taskType: TASK_TYPE,
+        taskId: documentId,
+        status: 'error',
+        message: err instanceof Error ? err.message : String(err),
+      });
       throw err;
     }
   }
 }
+

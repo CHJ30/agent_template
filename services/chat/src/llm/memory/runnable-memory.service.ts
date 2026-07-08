@@ -1,7 +1,9 @@
 import { Injectable, Inject } from '@nestjs/common';
-import { RunnableWithMessageHistory } from '@langchain/core/runnables';
+import { RunnableWithMessageHistory, RunnableLambda } from '@langchain/core/runnables';
 import { ChatPromptTemplate, MessagesPlaceholder } from '@langchain/core/prompts';
 import { StringOutputParser } from '@langchain/core/output_parsers';
+import { trimMessages } from '@langchain/core/messages';
+import type { BaseMessage } from '@langchain/core/messages';
 import { ChatOpenAI } from '@langchain/openai';
 import { MessageRole } from '@prisma/client';
 import { LLM_CONFIG } from '../llm.constants.js';
@@ -14,6 +16,32 @@ const MEMORY_SYSTEM_PROMPT =
   `你是一名专业的需求分析助手。` +
   `帮助团队分析、整理和完善软件需求，保持多轮对话的上下文一致性。` +
   `当用户提供需求单号、功能描述或约束条件时，请记住并在后续分析中引用。`;
+
+// History read from PostgreSQL can grow unbounded across a long conversation.
+// Trim it to a token budget before it's injected into the prompt so context
+// windows / cost stay bounded — keeps the MOST RECENT messages (oldest are
+// dropped first) and always starts on a human message so no orphaned AI
+// message leads the trimmed history.
+const MAX_HISTORY_TOKENS = 2000;
+
+// No tokenizer dependency installed — approximate 1 token ≈ 4 characters,
+// a common rough heuristic for mixed CJK/English content.
+function approxTokenCount(messages: BaseMessage[]): number {
+  const chars = messages.reduce((sum, m) => {
+    const content = typeof m.content === 'string' ? m.content : JSON.stringify(m.content);
+    return sum + content.length;
+  }, 0);
+  return Math.ceil(chars / 4);
+}
+
+function trimHistory(messages: BaseMessage[]): Promise<BaseMessage[]> {
+  return trimMessages(messages, {
+    maxTokens: MAX_HISTORY_TOKENS,
+    tokenCounter: approxTokenCount,
+    strategy: 'last',
+    startOn: 'human',
+  });
+}
 
 @Injectable()
 export class RunnableMemoryService {
@@ -43,7 +71,18 @@ export class RunnableMemoryService {
   }
 
   private buildChain(): RunnableWithMessageHistory<any, string> {
-    const chain = this.makePrompt()
+    // Trims `history` (populated by RunnableWithMessageHistory from
+    // getMessageHistory().getMessages()) to MAX_HISTORY_TOKENS before it
+    // ever reaches the prompt template.
+    const trimStep = RunnableLambda.from(
+      async (input: { input: string; history?: BaseMessage[] }) => ({
+        input: input.input,
+        history: input.history?.length ? await trimHistory(input.history) : [],
+      }),
+    );
+
+    const chain = trimStep
+      .pipe(this.makePrompt())
       .pipe(this.model)
       .pipe(new StringOutputParser());
 
@@ -54,6 +93,7 @@ export class RunnableMemoryService {
       historyMessagesKey: 'history',
     });
   }
+
 
   // ---------- 公开接口 ----------
 
