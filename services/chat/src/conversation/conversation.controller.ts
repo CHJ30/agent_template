@@ -54,11 +54,36 @@ export class ConversationController {
   async appendMessage(
     @CurrentUser() user: { userId: string },
     @Param('id') id: string,
-    @Body() body: { role: 'user' | 'assistant'; content: string },
+    @Body() body: { role: 'user' | 'assistant'; content: string; metadata?: Record<string, unknown> },
   ) {
     await this.conversationService.findById(id, user.userId);
     const role = body.role === 'user' ? MessageRole.USER : MessageRole.ASSISTANT;
-    return this.messageService.addMessage(id, role, body.content);
+    return this.messageService.addMessage(id, role, body.content, body.metadata);
+  }
+
+  @Post(':id/interactions/:componentId/resolve')
+  async resolveInteraction(
+    @CurrentUser() user: { userId: string },
+    @Param('id') id: string,
+    @Param('componentId') componentId: string,
+  ) {
+    await this.conversationService.findById(id, user.userId);
+    return { resolved: await this.messageService.resolveInteraction(id, componentId) };
+  }
+
+  @Post(':id/interactions/:componentId/start')
+  async startInteraction(
+    @CurrentUser() user: { userId: string },
+    @Param('id') id: string,
+    @Param('componentId') componentId: string,
+    @Body() body: { userText?: string },
+  ) {
+    await this.conversationService.findById(id, user.userId);
+    const started = await this.messageService.startInteraction(id, componentId);
+    if (started && body.userText) {
+      await this.messageService.addMessage(id, MessageRole.USER, body.userText);
+    }
+    return { started };
   }
 
   @Post(':id/chat')
@@ -81,4 +106,3 @@ export class ConversationController {
     return { ok: true };
   }
 }
-

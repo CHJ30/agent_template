@@ -130,6 +130,7 @@ const AGENT_LABELS: Record<string, string> = {
   classifier:    '意图识别',
   extractStep:   '需求提取',
   clarifyStep:   '澄清检查',
+  clarificationReviewStep: '等待用户补充',
   analysisStep:  '多维度分析',
   riskStep:      '风险评估',
   summaryStep:   '报告生成',
@@ -144,7 +145,8 @@ const AGENT_LABELS: Record<string, string> = {
 // we can predict the next node without needing a running graph instance.
 const NEXT_NODE: Record<string, string | null> = {
   extractStep:   'clarifyStep',
-  clarifyStep:   'analysisStep',
+  clarifyStep:   'clarificationReviewStep',
+  clarificationReviewStep: 'analysisStep',
   analysisStep:  'riskStep',
   riskStep:      'summaryStep',
   summaryStep:   'humanReviewStep',
@@ -159,20 +161,10 @@ const NEXT_NODE: Record<string, string | null> = {
 // only its start/end lifecycle and progress are surfaced.
 const MARKDOWN_NODES = new Set(['queryHandler', 'chatHandler']);
 
-// Always shown after extraction (see clarify-form branch below) when the
-// clarify step's own model call returned no usable questions — every
-// requirement gets at least one round of confirmation before analysis runs.
-const DEFAULT_CLARIFY_QUESTIONS = [
-  '目标用户是谁？',
-  '核心功能点有哪些？',
-  '是否有明确的约束条件（性能、安全、合规等）？',
-  '优先级是什么（P0/P1/P2/P3）？',
-];
-
 function totalStepsForIntent(intent: 'analyze' | 'query' | 'chat'): number {
-  // analyze: classifier → extract → clarify → analysis → risk → summary → HITL (7)
+  // analyze: classifier → extract → clarify → clarification HITL → analysis → risk → summary → report HITL (8)
   // query/chat: classifier → handler (2)
-  return intent === 'analyze' ? 7 : 2;
+  return intent === 'analyze' ? 8 : 2;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -405,12 +397,31 @@ export class OrchestratorService {
       );
 
       let finalState: Partial<RequirementState> = {};
-      let clarifyQuestions: string[] | null = null;
       let terminalNode: string | null = null;
 
       for await (const chunk of stream) {
         if (isInterrupted(chunk)) {
           const interruptValue = chunk.__interrupt__[0]?.value;
+          const interruptRecord = interruptValue && typeof interruptValue === 'object'
+            ? interruptValue as Record<string, unknown>
+            : null;
+
+          if (interruptRecord?.type === 'form') {
+            const clarifyPromptText = '\n\n为了更准确地分析您的需求，请补充以下信息：';
+            persistedContent += clarifyPromptText;
+            yield { messageType: 'markdown', isChunk: true, content: clarifyPromptText };
+            yield { messageType: 'ui', component: interruptRecord };
+            nodeTracer.endRequest(requestId, 'needs_clarification');
+            yield {
+              messageType: 'done',
+              status: 'needs_clarification',
+              intent: 'analyze',
+              usedAgents,
+              content: persistedContent,
+            };
+            return;
+          }
+
           const draft = finalState.summary ?? '';
           const reviewPromptText = '\n\n以下是等待您确认的分析报告：\n\n';
           persistedContent += reviewPromptText;
@@ -425,10 +436,10 @@ export class OrchestratorService {
             await sleep(15);
           }
 
-          if (interruptValue && typeof interruptValue === 'object') {
+          if (interruptRecord) {
             yield {
               messageType: 'ui',
-              component: interruptValue as Record<string, unknown>,
+              component: interruptRecord,
             };
           }
           nodeTracer.endRequest(requestId, 'awaiting_review');
@@ -501,20 +512,6 @@ export class OrchestratorService {
           }
         }
 
-        // ── needs_clarification short-circuit ──────────────────────────────
-        // Every requirement gets at least one clarification round before
-        // analysis runs — we don't gate this on the clarify step's own
-        // needsClarification judgment, since a vague input (e.g. "我要一个
-        // todo需求") can still produce a JSON blob that *looks* complete
-        // (the extract step fills every field, even generically), fooling
-        // that judgment into skipping clarification entirely.
-        if (nodeName === 'clarifyStep' && !skipClarification) {
-          const parsed = parseJson(update.clarified ?? '');
-          const questions = Array.isArray(parsed?.questions) ? parsed.questions.filter(Boolean) : [];
-          clarifyQuestions = questions.length ? questions : DEFAULT_CLARIFY_QUESTIONS;
-          break;
-        }
-
         // ── terminal, user-facing node reached ─────────────────────────────
         if (MARKDOWN_NODES.has(nodeName)) {
           terminalNode = nodeName;
@@ -528,39 +525,6 @@ export class OrchestratorService {
           yield { messageType: 'agent_start', agent: next, label: AGENT_LABELS[next] ?? next };
           nodeTracer.nodeStarted(requestId, next);
         }
-      }
-
-      // ── needs_clarification path ────────────────────────────────────────────
-      if (clarifyQuestions) {
-        const clarifyPromptText = '为了更准确地分析您的需求，请补充以下信息：';
-        persistedContent += clarifyPromptText;
-        yield { messageType: 'markdown', isChunk: true, content: clarifyPromptText };
-        yield {
-          messageType: 'ui',
-          component: {
-            type: 'form',
-            id: `form-clarify-${Date.now()}`,
-            title: '需要补充信息',
-            description: '请回答以下问题，以便更好地分析您的需求',
-            fields: clarifyQuestions.map((q, i) => ({
-              name: `q${i}`,
-              label: q,
-              fieldType: 'textarea',
-              required: false,
-              rows: 2,
-              placeholder: '请在此输入您的回答…',
-            })),
-            submitLabel: '提交补充信息',
-          },
-        };
-        nodeTracer.endRequest(requestId, 'needs_clarification');
-        yield {
-          messageType: 'done',
-          status: 'needs_clarification',
-          intent: 'analyze',
-          usedAgents,
-        };
-        return;
       }
 
       // ── markdown streaming (chunked replay of the terminal node's text) ────
@@ -755,6 +719,81 @@ export class OrchestratorService {
       };
     } catch (err) {
       yield { messageType: 'error', error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  /** Resumes the clarification form interrupt and runs until report review. */
+  async *resumeClarificationStream(
+    threadId: string,
+    answers: Record<string, string>,
+  ): AsyncGenerator<StreamEnvelope> {
+    const config = {
+      configurable: { thread_id: threadId },
+      streamMode: 'updates' as const,
+    };
+    try {
+      const analysisGraph = await this.analysisGraphPromise;
+      const snapshot = await analysisGraph.getState({ configurable: { thread_id: threadId } });
+      const checkpointState = snapshot.values as RequirementState;
+      const isWaiting = snapshot.next.includes('clarificationReviewStep') &&
+        checkpointState.humanReviewEnabled &&
+        checkpointState.humanReviewThreadId === threadId;
+      if (!isWaiting) throw new Error('该澄清表单已完成、已失效或不存在');
+
+      const stream = await analysisGraph.stream(
+        new Command({
+          resume: { answers },
+          update: { clarificationAnswers: answers },
+        }),
+        config,
+      );
+      let finalState: Partial<RequirementState> = {};
+      let completed = 0;
+      yield { messageType: 'agent_start', agent: 'clarificationReviewStep', label: AGENT_LABELS.clarificationReviewStep };
+
+      for await (const chunk of stream) {
+        if (isInterrupted(chunk)) {
+          const value = chunk.__interrupt__[0]?.value;
+          const component = value && typeof value === 'object'
+            ? value as Record<string, unknown>
+            : null;
+          const intro = '已收到补充信息，并完成后续分析。以下报告等待您的最终确认：\n\n';
+          let persistedContent = intro;
+          yield { messageType: 'markdown', isChunk: true, content: intro };
+          const draft = finalState.summary ?? '';
+          const CHUNK_SIZE = 12;
+          for (let index = 0; index < draft.length; index += CHUNK_SIZE) {
+            const piece = draft.slice(index, index + CHUNK_SIZE);
+            persistedContent += piece;
+            yield { messageType: 'markdown', isChunk: true, agent: 'summaryStep', content: piece };
+            // eslint-disable-next-line no-await-in-loop
+            await sleep(15);
+          }
+          if (component) yield { messageType: 'ui', component };
+          yield {
+            messageType: 'done',
+            status: 'awaiting_review',
+            intent: 'analyze',
+            content: persistedContent,
+          };
+          return;
+        }
+
+        const [nodeName, update] = Object.entries(
+          chunk as Record<string, Partial<RequirementState>>,
+        )[0] ?? [];
+        if (!nodeName || !update) continue;
+        finalState = { ...finalState, ...update };
+        completed += 1;
+        yield { messageType: 'agent_end', agent: nodeName, label: AGENT_LABELS[nodeName] ?? nodeName };
+        yield { messageType: 'progress', progress: Math.min(95, 45 + completed * 10) };
+        const next = NEXT_NODE[nodeName];
+        if (next) yield { messageType: 'agent_start', agent: next, label: AGENT_LABELS[next] ?? next };
+      }
+
+      yield { messageType: 'error', error: '澄清恢复后未到达报告确认节点' };
+    } catch (error) {
+      yield { messageType: 'error', error: error instanceof Error ? error.message : String(error) };
     }
   }
 

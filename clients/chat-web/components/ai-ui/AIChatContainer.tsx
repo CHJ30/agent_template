@@ -43,7 +43,13 @@ interface Props {
   // Fired once per completed exchange (after the SSE stream's 'done' event)
   // with the user's text and the assistant's full markdown reply, so the
   // parent page can persist it (e.g. POST /api/conversations/:id/messages).
-  onExchange?: (userText: string, assistantText: string) => void;
+  onExchange?: (
+    userText: string,
+    assistantText: string,
+    metadata?: Record<string, unknown>,
+  ) => void | Promise<void>;
+  onResolveInteraction?: (componentId: string) => void | Promise<void>;
+  onStartInteraction?: (componentId: string, userText: string) => void | Promise<void>;
 }
 
 // Quick-input shortcuts shown above the text box — clicking one sends it immediately.
@@ -97,6 +103,23 @@ function extractFileSearchQuery(text: string): string | null {
   return null;
 }
 
+function buildPendingHitlMetadata(
+  component: Record<string, unknown> | null,
+  agentSteps: AgentStepInfo[] = [],
+  progress = 0,
+) {
+  if (!component || (component.type !== "form" && component.type !== "confirmation")) return undefined;
+  return {
+    status: "pending_hitl",
+    componentId: typeof component.id === "string" ? component.id : "",
+    interruptKind: component.interruptKind,
+    resumeToken: component.resumeToken,
+    component,
+    agentSteps,
+    progress,
+  };
+}
+
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export function AIChatContainer({
@@ -105,6 +128,8 @@ export function AIChatContainer({
   sessionId: propSessionId,
   initialEntries,
   onExchange,
+  onResolveInteraction,
+  onStartInteraction,
 }: Props) {
   const router = useRouter();
   // Use the shared sessionId from the parent page if provided; otherwise generate one.
@@ -113,7 +138,9 @@ export function AIChatContainer({
   const sessionId = propSessionId || localSessionId;
   const [entries, setEntries] = useState<ChatEntry[]>(() => initialEntries ?? []);
   const [input, setInput] = useState("");
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(() =>
+    initialEntries?.some((entry) => entry.role === "assistant" && entry.streaming) ?? false,
+  );
   const [error, setError] = useState<string | null>(null);
   const [lastReportId, setLastReportId] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -122,6 +149,14 @@ export function AIChatContainer({
     (acc, e, i) => (e.role === "assistant" ? i : acc),
     -1,
   );
+
+  useEffect(() => {
+    if (!initialEntries) return;
+    setEntries(initialEntries);
+    setLoading(initialEntries.some(
+      (entry) => entry.role === "assistant" && entry.streaming,
+    ));
+  }, [initialEntries]);
 
   // Scroll to bottom whenever entries change
   useEffect(() => {
@@ -253,7 +288,7 @@ export function AIChatContainer({
           progress: 100,
           streaming: false,
         }));
-        onExchange?.(text, `已在文件库中查找：${fileSearchQuery}`);
+        await onExchange?.(text, `已在文件库中查找：${fileSearchQuery}`);
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
         updateAssistant(assistantId, (entry) => ({ ...entry, streaming: false }));
@@ -277,15 +312,33 @@ export function AIChatContainer({
     setLoading(true);
     try {
       let finalContent = "";
+      let pendingComponent: Record<string, unknown> | null = null;
+      let persistedProgress = 0;
+      const persistedSteps: AgentStepInfo[] = [];
       for await (const ev of streamOrchestrate(`${BASE}/api/agents/orchestrate-stream`, {
         input: sendText,
         sessionId,
         skipClarification: options?.skipClarification ?? false,
       })) {
         applyStreamEvent(assistantId, mdId, ev);
+        if (ev.messageType === "progress" && typeof ev.progress === "number") persistedProgress = ev.progress;
+        if ((ev.messageType === "agent_start" || ev.messageType === "agent_end") && ev.agent) {
+          const existing = persistedSteps.find((step) => step.agent === ev.agent);
+          const status = ev.messageType === "agent_end" ? "done" as const : "active" as const;
+          if (existing) existing.status = status;
+          else persistedSteps.push({ agent: ev.agent, label: ev.label ?? ev.agent, status });
+        }
+        if (ev.messageType === "ui" && ev.component &&
+          (ev.component.type === "form" || ev.component.type === "confirmation")) {
+          pendingComponent = ev.component;
+        }
         if (ev.messageType === "done" && ev.content) finalContent = ev.content;
       }
-      if (finalContent) onExchange?.(text, finalContent);
+      if (finalContent) await onExchange?.(
+        text,
+        finalContent,
+        buildPendingHitlMetadata(pendingComponent, persistedSteps, persistedProgress),
+      );
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       updateAssistant(assistantId, (entry) => ({ ...entry, streaming: false }));
@@ -349,7 +402,10 @@ export function AIChatContainer({
           applyStreamEvent(assistantId, mdId, ev);
           if (ev.messageType === "done" && ev.content) finalContent = ev.content;
         }
-        if (finalContent) onExchange?.(userText, finalContent);
+        if (finalContent) {
+          await onResolveInteraction?.(action.componentId);
+          await onExchange?.(userText, finalContent);
+        }
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
         updateAssistant(assistantId, (entry) => ({ ...entry, streaming: false }));
@@ -359,10 +415,8 @@ export function AIChatContainer({
       return;
     }
 
-    // Clarify form: assemble Q&A, prepend the original requirement text (so
-    // the backend keeps full context instead of reclassifying the bare Q&A
-    // answers as a brand-new, unrelated message — e.g. mistaking it for chat),
-    // and re-run orchestration via streaming with clarification skipped.
+    // Clarification HITL: resume the exact persisted LangGraph thread instead
+    // of starting a second analysis request.
     if (action.actionType === "form_submit" && action.componentId.startsWith("form-clarify-")) {
       const assistantIdx = entries.findIndex(
         (e) => e.role === "assistant" && e.components.some((c) => c.id === action.componentId),
@@ -372,24 +426,60 @@ export function AIChatContainer({
           ? (entries[assistantIdx] as AssistantEntry).components.find((c) => c.id === action.componentId)
           : undefined;
       const payload = action.payload as Record<string, string>;
+      const resumeToken = payload.resumeToken ?? "";
+      if (!resumeToken) {
+        setError("澄清流程恢复标识缺失，请重新发起分析");
+        return;
+      }
+      const answers = Object.fromEntries(
+        Object.entries(payload).filter(([key]) => key !== "resumeToken"),
+      );
       const answerText =
         component && component.type === "form"
           ? component.fields
-              .map((f) => `${f.label}\n${payload[f.name] ?? ""}`)
+              .map((f) => `${f.label}\n${answers[f.name] ?? ""}`)
               .join("\n\n")
-          : Object.values(payload).filter(Boolean).join("\n");
+          : Object.values(answers).filter(Boolean).join("\n");
 
-      let originalText = "";
-      for (let i = assistantIdx - 1; i >= 0; i--) {
-        const e = entries[i];
-        if (e.role === "user") {
-          originalText = e.text;
-          break;
+      addEntry({ id: crypto.randomUUID(), role: "user", text: answerText || "未补充，继续分析" });
+      const assistantId = crypto.randomUUID();
+      const mdId = `md-${assistantId}`;
+      addEntry({
+        id: assistantId,
+        role: "assistant",
+        components: [],
+        intent: "analyze",
+        progress: 45,
+        agentSteps: [],
+        streaming: true,
+      });
+      setError(null);
+      setLoading(true);
+      try {
+        const submittedText = answerText || "未补充，继续分析";
+        await onStartInteraction?.(action.componentId, submittedText);
+        let finalContent = "";
+        let pendingComponent: Record<string, unknown> | null = null;
+        for await (const ev of streamOrchestrate(
+          `${BASE}/api/agents/orchestrate-clarification-resume-stream`,
+          { threadId: resumeToken, answers, conversationId: sessionId, componentId: action.componentId },
+        )) {
+          applyStreamEvent(assistantId, mdId, ev);
+          if (ev.messageType === "ui" && ev.component &&
+            (ev.component.type === "form" || ev.component.type === "confirmation")) {
+            pendingComponent = ev.component;
+          }
+          if (ev.messageType === "done" && ev.content) finalContent = ev.content;
         }
+        // The backend persists both the running state and the resulting next
+        // interrupt/final content, so recovery does not depend on this SSE
+        // connection surviving until completion.
+      } catch (cause) {
+        setError(cause instanceof Error ? cause.message : String(cause));
+        updateAssistant(assistantId, (entry) => ({ ...entry, streaming: false }));
+      } finally {
+        setLoading(false);
       }
-      const sendText = originalText ? `${originalText}\n\n补充信息：\n${answerText}` : answerText;
-
-      await handleSend(answerText, { sendText, skipClarification: true });
       return;
     }
 

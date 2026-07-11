@@ -6,7 +6,7 @@ import { USERS, USER_KEYS, type UserKey } from "../lib/demoUsers";
 interface Props {
   userKey: UserKey;
   onUserKeyChange: (key: UserKey) => void;
-  active?: "chat" | "documents";
+  active?: "chat" | "documents" | "pipeline";
   documentCount?: number;
 }
 
@@ -35,6 +35,16 @@ export function AppHeader({ userKey, onUserKeyChange, active = "chat", documentC
             ].join(" ")}
           >
             文件{typeof documentCount === "number" ? ` ${documentCount}` : ""}
+          </Link>
+          <Link
+            href="/pipeline-demo"
+            className={[
+              "flex items-center gap-1.5 rounded-md px-3 py-1.5 font-medium transition-colors",
+              active === "pipeline" ? "bg-white text-blue-700 shadow-sm" : "text-gray-600 hover:text-gray-900",
+            ].join(" ")}
+          >
+            联合流水线
+            <span className="rounded bg-rose-100 px-1 py-0.5 text-[8px] font-bold leading-none text-rose-700">TEST</span>
           </Link>
           <Link
             href="/tests"

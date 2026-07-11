@@ -20,6 +20,8 @@ import { UIChatController } from './ui-protocol/ui-chat.controller.js';
 import { loadLangchainConfig } from './model.factory.js';
 import { LLM_CONFIG } from './llm.constants.js';
 import { ConversationService } from '../conversation/conversation.service.js';
+import { PipelineDemoController } from './pipeline-demo/pipeline-demo.controller.js';
+import { PipelineDemoService } from './pipeline-demo/pipeline-demo.service.js';
 
 @Module({
   imports: [AuthModule, MessageModule, DocumentModule],
@@ -30,6 +32,7 @@ import { ConversationService } from '../conversation/conversation.service.js';
     AgentsController,
     AdvancedController,
     UIChatController,
+    PipelineDemoController,
   ],
   providers: [
     { provide: LLM_CONFIG, useValue: loadLangchainConfig() },
@@ -43,6 +46,7 @@ import { ConversationService } from '../conversation/conversation.service.js';
     AdvancedAnalysisService,
     UIResponseService,
     UIFlowService,
+    PipelineDemoService,
   ],
   exports: [AdvancedAnalysisService],
 })

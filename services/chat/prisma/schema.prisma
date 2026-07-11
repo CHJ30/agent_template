@@ -92,3 +92,14 @@ model requirement_reports {
   status         String   @default("completed")
   createdAt      DateTime @default(now())
 }
+
+model pipeline_test_cases {
+  id          String   @id
+  title       String
+  description String
+  input       String
+  tickets     Json
+  enabled     Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}

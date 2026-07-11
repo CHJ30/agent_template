@@ -12,9 +12,37 @@ export class ConversationService {
   }
 
   async findByUser(userId: string) {
-    return this.prisma.conversations.findMany({
+    const conversations = await this.prisma.conversations.findMany({
       where: { userId },
       orderBy: { updatedAt: 'desc' },
+      include: {
+        messages: {
+          where: { role: 'ASSISTANT' },
+          orderBy: { createdAt: 'desc' },
+          take: 1,
+          select: { metadata: true },
+        },
+      },
+    });
+    return conversations.map(({ messages, ...conversation }) => {
+      const metadata = messages[0]?.metadata as Record<string, unknown> | null | undefined;
+      const rawStatus = metadata?.status;
+      const heartbeatValue = metadata?.heartbeatAt;
+      const heartbeatAt = typeof heartbeatValue === 'string'
+        ? Date.parse(heartbeatValue)
+        : Number.NaN;
+      // A process/browser crash can leave an old metadata row at `running`.
+      // Only a run with a recent server heartbeat is rendered as active.
+      const hasFreshHeartbeat = Number.isFinite(heartbeatAt) &&
+        Date.now() - heartbeatAt < 5 * 60 * 1000;
+      return {
+        ...conversation,
+        runStatus: rawStatus === 'running' && hasFreshHeartbeat
+          ? 'running'
+          : messages.length > 0
+            ? 'ready'
+            : 'idle',
+      };
     });
   }
 

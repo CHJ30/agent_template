@@ -2,6 +2,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { AIChatContainer } from "../components/ai-ui/AIChatContainer";
 import type { ChatEntry } from "../components/ai-ui/AIChatContainer";
+import type { UIComponent } from "../components/ai-ui/types";
 import { ConversationSidebar } from "../components/ai-ui/ConversationSidebar";
 import type { Conversation } from "../components/ai-ui/ConversationSidebar";
 import { ObservabilityDrawer } from "../components/ObservabilityDrawer";
@@ -18,6 +19,7 @@ interface StoredMessage {
   id: string;
   role: "USER" | "ASSISTANT";
   content: string;
+  metadata?: Record<string, unknown> | null;
 }
 
 // Persisted messages are plain text/markdown — reconstructed as a single
@@ -27,13 +29,35 @@ function messagesToEntries(messages: StoredMessage[]): ChatEntry[] {
   return messages.map((m) =>
     m.role === "USER"
       ? { id: m.id, role: "user", text: m.content }
-      : {
+      : (() => {
+          const metadata = m.metadata;
+          const pendingComponent = metadata?.status === "pending_hitl" &&
+            metadata.component && typeof metadata.component === "object"
+            ? metadata.component as UIComponent
+            : null;
+          const running = metadata?.status === "running";
+          const resultContent = typeof metadata?.resultContent === "string"
+            ? metadata.resultContent
+            : "";
+          const failed = metadata?.status === "failed";
+          const agentSteps = Array.isArray(metadata?.agentSteps)
+            ? metadata.agentSteps as NonNullable<Extract<ChatEntry, { role: "assistant" }>['agentSteps']>
+            : [];
+          const persistedProgress = typeof metadata?.progress === "number" ? metadata.progress : undefined;
+          return {
           id: m.id,
           role: "assistant",
-          components: [{ type: "text", id: `hist-${m.id}`, content: m.content, format: "markdown" }],
-          streaming: false,
-          progress: 100,
-        },
+          components: [
+            ...((resultContent || m.content) ? [{ type: "text" as const, id: `hist-${m.id}`, content: resultContent || m.content, format: "markdown" as const }] : []),
+            ...(running ? [{ type: "text" as const, id: `running-${m.id}`, content: "需求澄清已提交，正在继续分析，请稍候……", format: "plain" as const }] : []),
+            ...(failed ? [{ type: "text" as const, id: `failed-${m.id}`, content: `执行失败：${String(metadata?.error ?? "未知错误")}`, format: "plain" as const }] : []),
+            ...(pendingComponent ? [pendingComponent] : []),
+          ],
+          streaming: running,
+          progress: running ? (persistedProgress ?? 45) : 100,
+          agentSteps,
+          };
+        })(),
   );
 }
 
@@ -59,6 +83,7 @@ export default function HomePage() {
   }, [loadDocuments]);
 
   const selectConversation = useCallback(async (conv: Conversation) => {
+    sessionStorage.setItem(`active_conversation:${userKey}`, conv.id);
     setActiveConv(conv);
     setLoadingHistory(true);
     try {
@@ -71,15 +96,57 @@ export default function HomePage() {
       setLoadingHistory(false);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user.token]);
+  }, [user.token, userKey]);
+
+  useEffect(() => {
+    const savedId = sessionStorage.getItem(`active_conversation:${userKey}`);
+    if (!savedId || activeConv) return;
+    let cancelled = false;
+    void fetch(`${API_BASE}/api/conversations`, {
+      headers: { Authorization: `Bearer ${user.token}` },
+    })
+      .then(async (response) => response.ok ? response.json() as Promise<Conversation[]> : [])
+      .then((conversations) => {
+        if (cancelled) return;
+        const saved = conversations.find((conversation) => conversation.id === savedId);
+        if (saved) void selectConversation(saved);
+        else sessionStorage.removeItem(`active_conversation:${userKey}`);
+      });
+    return () => { cancelled = true; };
+  }, [activeConv, selectConversation, user.token, userKey]);
+
+  // A resumed graph keeps running on the server even when the browser that
+  // opened the SSE connection is refreshed. Poll only while a persisted HITL
+  // message is marked running; the next interrupt/result replaces the loader.
+  useEffect(() => {
+    if (!activeConv || !initialEntries.some(
+      (entry) => entry.role === "assistant" && entry.streaming,
+    )) return;
+    let cancelled = false;
+    const timer = window.setInterval(() => {
+      void fetch(`${API_BASE}/api/conversations/${activeConv.id}/messages`, {
+        headers: { Authorization: `Bearer ${user.token}` },
+      }).then(async (response) => {
+        if (!cancelled && response.ok) {
+          setInitialEntries(messagesToEntries(await response.json() as StoredMessage[]));
+        }
+      });
+    }, 2000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [activeConv, initialEntries, user.token]);
 
   function handleCreated(conv: Conversation) {
+    sessionStorage.setItem(`active_conversation:${userKey}`, conv.id);
     setActiveConv(conv);
     setInitialEntries([]);
   }
 
   function handleDeleted(id: string) {
     if (activeConv?.id === id) {
+      sessionStorage.removeItem(`active_conversation:${userKey}`);
       setActiveConv(null);
       setInitialEntries([]);
     }
@@ -87,18 +154,39 @@ export default function HomePage() {
 
   // Persists each completed exchange to the conversations/messages tables so
   // it shows up next time this conversation is reopened from the sidebar.
-  function persistExchange(userText: string, assistantText: string) {
+  async function persistExchange(
+    userText: string,
+    assistantText: string,
+    metadata?: Record<string, unknown>,
+  ) {
     if (!activeConv) return;
     const headers = { "Content-Type": "application/json", Authorization: `Bearer ${user.token}` };
-    void fetch(`${API_BASE}/api/conversations/${activeConv.id}/messages`, {
+    await fetch(`${API_BASE}/api/conversations/${activeConv.id}/messages`, {
       method: "POST",
       headers,
       body: JSON.stringify({ role: "user", content: userText }),
     });
-    void fetch(`${API_BASE}/api/conversations/${activeConv.id}/messages`, {
+    await fetch(`${API_BASE}/api/conversations/${activeConv.id}/messages`, {
       method: "POST",
       headers,
-      body: JSON.stringify({ role: "assistant", content: assistantText }),
+      body: JSON.stringify({ role: "assistant", content: assistantText, metadata }),
+    });
+  }
+
+  async function resolveInteraction(componentId: string) {
+    if (!activeConv) return;
+    await fetch(`${API_BASE}/api/conversations/${activeConv.id}/interactions/${encodeURIComponent(componentId)}/resolve`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${user.token}` },
+    });
+  }
+
+  async function startInteraction(componentId: string, userText: string) {
+    if (!activeConv) return;
+    await fetch(`${API_BASE}/api/conversations/${activeConv.id}/interactions/${encodeURIComponent(componentId)}/start`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${user.token}` },
+      body: JSON.stringify({ userText }),
     });
   }
 
@@ -136,6 +224,8 @@ export default function HomePage() {
                   sessionId={activeConv.id}
                   initialEntries={initialEntries}
                   onExchange={persistExchange}
+                  onResolveInteraction={resolveInteraction}
+                  onStartInteraction={startInteraction}
                 />
               )}
               {activeConv && loadingHistory && (

@@ -29,6 +29,12 @@ const TEST_PAGES = [
     description: "调度器路由与专家编排测试。",
   },
   {
+    id: "pipeline-demo",
+    label: "组合流水线演示",
+    href: "/pipeline-demo",
+    description: "规划执行、多专家调度与反思重试的联合分析流水线。",
+  },
+  {
     id: "production",
     label: "生产环境加固测试",
     href: "/production-test",

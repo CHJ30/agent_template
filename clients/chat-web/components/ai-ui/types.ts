@@ -48,6 +48,8 @@ export interface FormComponent {
   description?: string;
   fields: FormField[];
   submitLabel?: string;
+  resumeToken?: string;
+  interruptKind?: 'clarification';
 }
 
 export interface ConfirmationComponent {
@@ -62,6 +64,7 @@ export interface ConfirmationComponent {
   inputLabel?: string;
   inputPlaceholder?: string;
   resumeToken?: string;
+  interruptKind?: 'summary_review';
 }
 
 export interface CardField {

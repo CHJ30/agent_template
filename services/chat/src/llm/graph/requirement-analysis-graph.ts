@@ -69,6 +69,7 @@ export const RequirementAnalysisState = Annotation.Root({
   intent:            Annotation<'analyze' | 'query' | 'chat'>({ reducer: (_, b) => b, default: () => 'analyze' }),
   extracted:         Annotation<string>({ reducer: (_, b) => b, default: () => '' }),
   clarified:         Annotation<string>({ reducer: (_, b) => b, default: () => '' }),
+  clarificationAnswers: Annotation<Record<string, string>>({ reducer: (_, b) => b, default: () => ({}) }),
   analysisResult:    Annotation<string>({ reducer: (_, b) => b, default: () => '' }),
   toolLoopCount:     Annotation<number>({ reducer: (_, b) => b, default: () => 0  }),
   risk:              Annotation<string>({ reducer: (_, b) => b, default: () => '' }),
@@ -245,10 +246,33 @@ interface SummaryReviewInterrupt {
   inputLabel: string;
   inputPlaceholder: string;
   resumeToken: string;
+  interruptKind: 'summary_review';
 }
 
 interface SummaryReviewResume {
   confirmed: boolean;
+}
+
+interface ClarificationInterrupt {
+  type: 'form';
+  id: string;
+  title: string;
+  description: string;
+  fields: Array<{
+    name: string;
+    label: string;
+    fieldType: 'textarea';
+    required: boolean;
+    rows: number;
+    placeholder: string;
+  }>;
+  submitLabel: string;
+  resumeToken: string;
+  interruptKind: 'clarification';
+}
+
+interface ClarificationResume {
+  answers: Record<string, string>;
 }
 
 // NOTE: every property here must be present in `required` for OpenAI's strict
@@ -407,6 +431,58 @@ function buildNodes(model: ChatOpenAI) {
     }
   };
 
+  const clarificationReviewNode = (state: RequirementState): Partial<RequirementState> => {
+    if (!state.humanReviewEnabled || state.skipClarification) return {};
+
+    let questions: string[] = [];
+    try {
+      const parsed = JSON.parse(
+        state.clarified.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, ''),
+      ) as { questions?: unknown };
+      if (Array.isArray(parsed.questions)) {
+        questions = parsed.questions.filter((item): item is string =>
+          typeof item === 'string' && item.trim().length > 0,
+        );
+      }
+    } catch {
+      // Use stable fallback questions below.
+    }
+    if (questions.length === 0) {
+      questions = [
+        '目标用户是谁？',
+        '核心功能点有哪些？',
+        '是否有明确的性能、安全或合规约束？',
+        '需求优先级是什么（P0/P1/P2/P3）？',
+      ];
+    }
+
+    const resumeValue = interrupt<ClarificationInterrupt, ClarificationResume>({
+      type: 'form',
+      id: `form-clarify-${state.humanReviewThreadId}`,
+      title: '需要补充信息',
+      description: '请回答以下问题。该表单已持久化，刷新页面后仍可继续。',
+      fields: questions.map((question, index) => ({
+        name: `q${index}`,
+        label: question,
+        fieldType: 'textarea',
+        required: false,
+        rows: 2,
+        placeholder: '请在此输入您的回答…',
+      })),
+      submitLabel: '提交补充信息并继续分析',
+      resumeToken: state.humanReviewThreadId,
+      interruptKind: 'clarification',
+    });
+    const answers = resumeValue.answers ?? {};
+    const answerText = questions
+      .map((question, index) => `${question}\n${answers[`q${index}`]?.trim() || '未补充'}`)
+      .join('\n\n');
+    return {
+      clarificationAnswers: answers,
+      extracted: `${state.extracted}\n\n用户补充信息：\n${answerText}`,
+    };
+  };
+
   // ── 9.2 Supervisor + multi-expert sub-graph (replaces single-agent ReAct) ──
   // Original single-agent version kept below for reference:
   //   const subGraph = createAnalysisSubGraph(model);
@@ -511,6 +587,7 @@ function buildNodes(model: ChatOpenAI) {
       inputLabel: '人工评审意见（可选）',
       inputPlaceholder: '例如：请补充数据迁移风险，并明确第二阶段的依赖关系。',
       resumeToken: state.humanReviewThreadId,
+      interruptKind: 'summary_review',
     });
     const accepted = resumeValue === true || resumeValue.confirmed;
 
@@ -591,7 +668,8 @@ function buildNodes(model: ChatOpenAI) {
   };
 
   return {
-    classifierNode, extractNode, clarifyNode, analysisNode, riskNode, summaryNode,
+    classifierNode, extractNode, clarifyNode, clarificationReviewNode,
+    analysisNode, riskNode, summaryNode,
     humanReviewNode, humanRefineNode, queryHandlerNode, chatHandlerNode,
   };
 }
@@ -606,7 +684,8 @@ function routeAfterHumanReview(state: RequirementState): string {
 
 export function createAnalysisGraph(model: ChatOpenAI, checkpointer?: BaseCheckpointSaver) {
   const {
-    classifierNode, extractNode, clarifyNode, analysisNode, riskNode, summaryNode,
+    classifierNode, extractNode, clarifyNode, clarificationReviewNode,
+    analysisNode, riskNode, summaryNode,
     humanReviewNode, humanRefineNode, queryHandlerNode, chatHandlerNode,
   } = buildNodes(model);
 
@@ -614,6 +693,7 @@ export function createAnalysisGraph(model: ChatOpenAI, checkpointer?: BaseCheckp
     .addNode('classifier',   classifierNode)
     .addNode('extractStep',  extractNode)
     .addNode('clarifyStep',  clarifyNode)
+    .addNode('clarificationReviewStep', clarificationReviewNode)
     .addNode('analysisStep', analysisNode)
     .addNode('riskStep',     riskNode)
     .addNode('summaryStep',  summaryNode)
@@ -624,7 +704,8 @@ export function createAnalysisGraph(model: ChatOpenAI, checkpointer?: BaseCheckp
     .addEdge(START, 'classifier')
     .addConditionalEdges('classifier', routeByIntent)
     .addEdge('extractStep',  'clarifyStep')
-    .addEdge('clarifyStep',  'analysisStep')
+    .addEdge('clarifyStep',  'clarificationReviewStep')
+    .addEdge('clarificationReviewStep', 'analysisStep')
     .addEdge('analysisStep', 'riskStep')
     .addEdge('riskStep',     'summaryStep')
     .addEdge('summaryStep',  'humanReviewStep')
