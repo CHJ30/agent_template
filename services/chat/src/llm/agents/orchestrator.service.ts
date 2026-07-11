@@ -1,10 +1,18 @@
 import { Injectable, Inject } from '@nestjs/common';
+import { randomUUID } from 'node:crypto';
 import { ChatOpenAI } from '@langchain/openai';
 import { LLM_CONFIG } from '../llm.constants.js';
 import type { LlmConfig } from '../model.factory.js';
 import { HumanMessage } from '@langchain/core/messages';
+import { Command, isInterrupted } from '@langchain/langgraph';
 import { createChatModel } from '../model.factory.js';
-import { runAnalysisGraph, createAnalysisGraph, keywordClassify, REQ_ID_RE } from '../graph/requirement-analysis-graph.js';
+import {
+  runAnalysisGraph,
+  createAnalysisGraph,
+  createPostgresSaver,
+  keywordClassify,
+  REQ_ID_RE,
+} from '../graph/requirement-analysis-graph.js';
 import type { RequirementState } from '../graph/requirement-analysis-graph.js';
 import { createAnalysisSupervisorSubGraph } from '../graph/experts.js';
 import { RequirementReportService } from './requirement-report.service.js';
@@ -112,7 +120,7 @@ export interface StreamEnvelope {
   component?: Record<string, any>;
   progress?: number;
   intent?: 'analyze' | 'query' | 'chat';
-  status?: 'completed' | 'needs_clarification' | 'failed';
+  status?: 'completed' | 'needs_clarification' | 'awaiting_review' | 'failed';
   reportId?: string;
   usedAgents?: string[];
   error?: string;
@@ -125,6 +133,8 @@ const AGENT_LABELS: Record<string, string> = {
   analysisStep:  '多维度分析',
   riskStep:      '风险评估',
   summaryStep:   '报告生成',
+  humanReviewStep: '人工评审',
+  humanRefineStep: '人工意见修订',
   queryHandler:  '需求查询',
   chatHandler:   '闲聊对话',
 };
@@ -137,7 +147,9 @@ const NEXT_NODE: Record<string, string | null> = {
   clarifyStep:   'analysisStep',
   analysisStep:  'riskStep',
   riskStep:      'summaryStep',
-  summaryStep:   null,
+  summaryStep:   'humanReviewStep',
+  humanReviewStep: null,
+  humanRefineStep: null,
   queryHandler:  null,
   chatHandler:   null,
 };
@@ -145,7 +157,7 @@ const NEXT_NODE: Record<string, string | null> = {
 // Terminal, user-facing nodes whose output is prose meant to be streamed to the
 // client as markdown. Every other node ("JSON agents") is collected silently —
 // only its start/end lifecycle and progress are surfaced.
-const MARKDOWN_NODES = new Set(['summaryStep', 'queryHandler', 'chatHandler']);
+const MARKDOWN_NODES = new Set(['queryHandler', 'chatHandler']);
 
 // Always shown after extraction (see clarify-form branch below) when the
 // clarify step's own model call returned no usable questions — every
@@ -158,9 +170,9 @@ const DEFAULT_CLARIFY_QUESTIONS = [
 ];
 
 function totalStepsForIntent(intent: 'analyze' | 'query' | 'chat'): number {
-  // analyze: classifier → extract → clarify → analysis → risk → summary (6)
+  // analyze: classifier → extract → clarify → analysis → risk → summary → HITL (7)
   // query/chat: classifier → handler (2)
-  return intent === 'analyze' ? 6 : 2;
+  return intent === 'analyze' ? 7 : 2;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -210,12 +222,19 @@ function parseJson(text: string): any {
 @Injectable()
 export class OrchestratorService {
   private readonly model: ChatOpenAI;
+  private readonly analysisGraphPromise: Promise<ReturnType<typeof createAnalysisGraph>>;
 
   constructor(
     @Inject(LLM_CONFIG) config: LlmConfig,
     private readonly requirementReportService: RequirementReportService,
   ) {
     this.model = createChatModel(config);
+    // The same saver and compiled graph must live across HTTP requests so an
+    // interrupt raised by one request can be resumed by the user's next click.
+    // Postgres keeps pending reviews durable across restarts; local development
+    // transparently falls back to MemorySaver when DATABASE_URL is unavailable.
+    this.analysisGraphPromise = createPostgresSaver()
+      .then((checkpointer) => createAnalysisGraph(this.model, checkpointer));
   }
 
   async orchestrate(input: string, skipClarification = false): Promise<OrchestratorResult> {
@@ -344,7 +363,7 @@ export class OrchestratorService {
     skipClarification = false,
     sessionId = 'anonymous',
   ): AsyncGenerator<StreamEnvelope> {
-    const requestId = `${sessionId}:${Date.now()}`;
+    const requestId = `${sessionId}:${randomUUID()}`;
     nodeTracer.startRequest(sessionId, requestId);
     const usedAgents: string[] = [];
     const nodeErrors: string[] = [];
@@ -371,10 +390,18 @@ export class OrchestratorService {
         }
       }
 
-      const app = createAnalysisGraph(this.model);
-      const stream = await app.stream(
-        { messages: [new HumanMessage(augmentedInput)], skipClarification },
-        { streamMode: 'updates' },
+      const analysisGraph = await this.analysisGraphPromise;
+      const stream = await analysisGraph.stream(
+        {
+          messages: [new HumanMessage(augmentedInput)],
+          skipClarification,
+          humanReviewEnabled: true,
+          humanReviewThreadId: requestId,
+        },
+        {
+          configurable: { thread_id: requestId },
+          streamMode: 'updates',
+        },
       );
 
       let finalState: Partial<RequirementState> = {};
@@ -382,6 +409,39 @@ export class OrchestratorService {
       let terminalNode: string | null = null;
 
       for await (const chunk of stream) {
+        if (isInterrupted(chunk)) {
+          const interruptValue = chunk.__interrupt__[0]?.value;
+          const draft = finalState.summary ?? '';
+          const reviewPromptText = '\n\n以下是等待您确认的分析报告：\n\n';
+          persistedContent += reviewPromptText;
+          yield { messageType: 'markdown', isChunk: true, content: reviewPromptText };
+
+          const CHUNK_SIZE = 12;
+          for (let i = 0; i < draft.length; i += CHUNK_SIZE) {
+            const piece = draft.slice(i, i + CHUNK_SIZE);
+            persistedContent += piece;
+            yield { messageType: 'markdown', isChunk: true, agent: 'summaryStep', content: piece };
+            // eslint-disable-next-line no-await-in-loop
+            await sleep(15);
+          }
+
+          if (interruptValue && typeof interruptValue === 'object') {
+            yield {
+              messageType: 'ui',
+              component: interruptValue as Record<string, unknown>,
+            };
+          }
+          nodeTracer.endRequest(requestId, 'awaiting_review');
+          yield {
+            messageType: 'done',
+            status: 'awaiting_review',
+            intent: 'analyze',
+            usedAgents,
+            content: persistedContent,
+          };
+          return;
+        }
+
         const [nodeName, update] = Object.entries(chunk as Record<string, Partial<RequirementState>>)[0];
         finalState = { ...finalState, ...update };
         if (update.nodeErrors?.length) nodeErrors.push(...update.nodeErrors);
@@ -579,6 +639,121 @@ export class OrchestratorService {
       };
     } catch (err) {
       nodeTracer.endRequest(requestId, 'error');
+      yield { messageType: 'error', error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  /**
+   * Resumes the summary HITL interrupt. The Command updates `critique` in the
+   * checkpoint before the interrupted node is re-run, and supplies the boolean
+   * value returned by `interrupt()` at the same time.
+   */
+  async *resumeSummaryReviewStream(
+    threadId: string,
+    confirmed: boolean,
+    critique = '',
+  ): AsyncGenerator<StreamEnvelope> {
+    const config = { configurable: { thread_id: threadId } };
+
+    try {
+      const analysisGraph = await this.analysisGraphPromise;
+      const snapshot = await analysisGraph.getState(config);
+      const checkpointState = snapshot.values as RequirementState;
+      const isWaitingForReview = snapshot.next.includes('humanReviewStep') &&
+        checkpointState.humanReviewEnabled &&
+        checkpointState.humanReviewThreadId === threadId;
+
+      if (!isWaitingForReview) {
+        throw new Error('该人工评审已完成、已失效或不存在');
+      }
+
+      const normalizedCritique = confirmed ? critique.trim() : '';
+      yield { messageType: 'agent_start', agent: 'humanReviewStep', label: AGENT_LABELS.humanReviewStep };
+
+      // `update` is applied to RequirementAnalysisState before the interrupted
+      // node restarts; `resume` becomes the return value of interrupt().
+      const state = await analysisGraph.invoke(
+        new Command({
+          // LangGraph 1.4.1 treats a bare `resume: false` as an empty Command.
+          // Preserve literal `true` for confirmation and wrap rejection so the
+          // interrupted node still receives an explicit false decision.
+          resume: confirmed ? true : { confirmed: false },
+          update: { critique: normalizedCritique },
+        }),
+        config,
+      );
+
+      yield { messageType: 'agent_end', agent: 'humanReviewStep', label: AGENT_LABELS.humanReviewStep };
+      if (confirmed && normalizedCritique) {
+        yield { messageType: 'agent_start', agent: 'humanRefineStep', label: AGENT_LABELS.humanRefineStep };
+        yield { messageType: 'agent_end', agent: 'humanRefineStep', label: AGENT_LABELS.humanRefineStep };
+      }
+
+      const intro = confirmed && normalizedCritique
+        ? '已根据您的评审意见完成修订：\n\n'
+        : '当前报告已通过人工确认：\n\n';
+      let persistedContent = intro;
+      yield { messageType: 'markdown', isChunk: true, content: intro };
+
+      const fullText = state.summary ?? '';
+      const CHUNK_SIZE = 12;
+      for (let i = 0; i < fullText.length; i += CHUNK_SIZE) {
+        const piece = fullText.slice(i, i + CHUNK_SIZE);
+        persistedContent += piece;
+        yield { messageType: 'markdown', isChunk: true, agent: 'summaryStep', content: piece };
+        // eslint-disable-next-line no-await-in-loop
+        await sleep(15);
+      }
+
+      const hasNodeErrors = (state.nodeErrors?.length ?? 0) > 0;
+      const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+      const seq = String(Math.floor(Math.random() * 900) + 100);
+      const reportId = `REQ-${dateStr}-${seq}`;
+      const originalInput = String(state.messages.at(-1)?.content ?? '');
+
+      if (!hasNodeErrors) {
+        void this.requirementReportService.save({
+          reportId,
+          input:          originalInput,
+          extracted:      state.extracted,
+          analysisResult: state.analysisResult,
+          risk:           state.risk,
+          summary:        state.summary ?? '',
+        });
+      }
+
+      const reportPromptText = '\n\n您可以点击下方按钮查看完整的分析报告：';
+      persistedContent += reportPromptText;
+      yield { messageType: 'markdown', isChunk: true, content: reportPromptText };
+      yield {
+        messageType: 'ui',
+        component: {
+          type: 'action_buttons',
+          id: `actions-${reportId}`,
+          layout: 'horizontal',
+          buttons: [
+            {
+              id: 'btn-view-report',
+              label: '查看分析报告',
+              actionId: 'view_report',
+              variant: 'primary',
+              payload: { reqId: reportId },
+            },
+          ],
+        },
+      };
+      yield { messageType: 'progress', progress: 100 };
+      yield {
+        messageType: 'done',
+        status: hasNodeErrors ? 'failed' : 'completed',
+        intent: 'analyze',
+        reportId,
+        usedAgents: normalizedCritique
+          ? ['humanReviewStep', 'humanRefineStep']
+          : ['humanReviewStep'],
+        content: persistedContent,
+      };
+    } catch (err) {
       yield { messageType: 'error', error: err instanceof Error ? err.message : String(err) };
     }
   }

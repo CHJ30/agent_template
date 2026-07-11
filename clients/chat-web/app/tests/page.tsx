@@ -6,57 +6,57 @@ import Link from "next/link";
 const TEST_PAGES = [
   {
     id: "ui-component",
-    label: "UIcomponent",
+    label: "界面组件测试",
     href: "/ui-component-test",
-    description: "UI protocol version, unknown component fallback, and SSE streaming protocol tests.",
+    description: "界面协议版本、未知组件降级处理与流式传输协议测试。",
   },
   {
     id: "graph",
-    label: "Graph Test",
+    label: "流程图测试",
     href: "/graph-test",
-    description: "Requirement analysis graph execution test.",
+    description: "需求分析流程图执行测试。",
   },
   {
     id: "analysis",
-    label: "ReAct Test",
+    label: "推理行动测试",
     href: "/analysis-test",
-    description: "ReAct analysis flow test.",
+    description: "推理与行动分析流程测试。",
   },
   {
     id: "supervisor",
-    label: "Supervisor Test",
+    label: "调度器测试",
     href: "/supervisor-test",
-    description: "Supervisor routing and expert orchestration test.",
+    description: "调度器路由与专家编排测试。",
   },
   {
     id: "production",
-    label: "Production Hardening",
+    label: "生产环境加固测试",
     href: "/production-test",
-    description: "Production safety and fallback behavior test.",
+    description: "生产环境安全性与降级行为测试。",
   },
   {
     id: "mcp",
-    label: "MCP Inspector",
+    label: "模型上下文协议检查器",
     href: "/mcp-inspector",
-    description: "MCP proxy and tool inspection page.",
+    description: "模型上下文协议代理与工具检查页面。",
   },
   {
     id: "web-search",
-    label: "Web Search",
+    label: "网络搜索测试",
     href: "/web-search-test",
-    description: "Web search tool integration test.",
+    description: "网络搜索工具集成测试。",
   },
   {
     id: "skills",
-    label: "Skills Demo",
+    label: "技能演示",
     href: "/skills-demo",
-    description: "Skill loading and tool demo page.",
+    description: "技能加载与工具演示页面。",
   },
   {
     id: "memory",
-    label: "Memory Test",
+    label: "记忆功能测试",
     href: "/memory-test",
-    description: "PostgreSQL-backed conversation memory: session list + multi-turn recall test.",
+    description: "基于数据库的对话记忆：会话列表与多轮回忆测试。",
   },
 ] as const;
 
@@ -75,20 +75,20 @@ export default function TestsPage() {
             Autix
           </Link>
           <span className="text-gray-200">/</span>
-          <span className="text-sm font-semibold text-gray-700">Tests</span>
+          <span className="text-sm font-semibold text-gray-700">测试中心</span>
         </div>
         <Link
           href="/"
           className="rounded-lg border border-gray-200 px-3 py-1 text-xs text-gray-500 transition-colors hover:bg-gray-50"
         >
-          Back
+          返回
         </Link>
       </header>
 
       <main className="grid min-h-0 flex-1 grid-cols-[280px_1fr]">
         <aside className="border-r border-gray-200 bg-white p-4">
           <div className="mb-3 text-xs font-semibold uppercase tracking-wide text-gray-400">
-            Test pages
+            测试页面
           </div>
           <nav className="space-y-1">
             {TEST_PAGES.map((page) => (
@@ -119,7 +119,7 @@ export default function TestsPage() {
               href={activePage.href}
               className="rounded-lg border border-gray-200 px-3 py-1 text-xs text-gray-500 transition-colors hover:bg-gray-50"
             >
-              Open route
+              打开页面
             </Link>
           </div>
 

@@ -58,6 +58,9 @@ export interface ConfirmationComponent {
   confirmLabel?: string;
   cancelLabel?: string;
   variant?: 'default' | 'warning' | 'danger';
+  inputLabel?: string;
+  inputPlaceholder?: string;
+  resumeToken?: string;
 }
 
 export interface CardField {

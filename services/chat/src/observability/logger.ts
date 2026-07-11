@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import pino from 'pino';
 import path from 'path';
 import { getTraceId } from './trace-context.js';

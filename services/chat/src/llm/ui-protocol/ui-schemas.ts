@@ -60,6 +60,9 @@ export const confirmationComponentSchema = z.object({
   confirmLabel: z.string().optional(),
   cancelLabel: z.string().optional(),
   variant: z.enum(['default', 'warning', 'danger']).optional(),
+  inputLabel: z.string().optional(),
+  inputPlaceholder: z.string().optional(),
+  resumeToken: z.string().optional(),
 });
 
 export const cardFieldSchema = z.object({

@@ -1,4 +1,5 @@
 "use client";
+import { useState } from "react";
 import type { ConfirmationComponent, UIAction } from "./types";
 
 interface Props {
@@ -21,12 +22,17 @@ const BORDER_COLORS: Record<string, string> = {
 
 export function ConfirmationDialog({ component, onAction, disabled = false }: Props) {
   const variant = component.variant ?? "default";
+  const [comment, setComment] = useState("");
 
   function fire(confirmed: boolean) {
     onAction({
       actionType: "confirmation",
       componentId: component.id,
-      payload: { confirmed },
+      payload: {
+        confirmed,
+        comment,
+        resumeToken: component.resumeToken,
+      },
     });
   }
 
@@ -46,8 +52,25 @@ export function ConfirmationDialog({ component, onAction, disabled = false }: Pr
         </ul>
       )}
 
+      {component.inputLabel && (
+        <label className="mb-4 block">
+          <span className="mb-1.5 block text-xs font-medium text-gray-700">
+            {component.inputLabel}
+          </span>
+          <textarea
+            value={comment}
+            onChange={(event) => setComment(event.target.value)}
+            placeholder={component.inputPlaceholder}
+            rows={4}
+            disabled={disabled}
+            className="w-full resize-y rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-800 placeholder:text-gray-400 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:opacity-60"
+          />
+        </label>
+      )}
+
       <div className="flex gap-2">
         <button
+          type="button"
           onClick={() => fire(true)}
           disabled={disabled}
           className={`flex-1 rounded-lg px-4 py-2 text-sm font-medium text-white transition-colors disabled:opacity-50 ${CONFIRM_COLORS[variant]}`}
@@ -55,6 +78,7 @@ export function ConfirmationDialog({ component, onAction, disabled = false }: Pr
           {component.confirmLabel ?? "确认"}
         </button>
         <button
+          type="button"
           onClick={() => fire(false)}
           disabled={disabled}
           className="flex-1 rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"

@@ -120,6 +120,45 @@ export class AgentsController {
     }
   }
 
+  /** Resumes a paused summary-review interrupt with the user's decision. */
+  @Post('orchestrate-resume-stream')
+  async resumeOrchestrateStream(
+    @Body() body: {
+      threadId: string;
+      confirmed: boolean;
+      critique?: string;
+    },
+    @Res() res: Response,
+  ): Promise<void> {
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders();
+
+    const write = (event: StreamEnvelope) => {
+      res.write(`data: ${JSON.stringify(event)}\n\n`);
+    };
+
+    try {
+      for await (const event of this.orchestratorService.resumeSummaryReviewStream(
+        body.threadId,
+        body.confirmed,
+        body.critique ?? '',
+      )) {
+        if (res.writableEnded) break;
+        write(event);
+        if (event.messageType === 'done' || event.messageType === 'error') break;
+      }
+    } catch (err) {
+      if (!res.writableEnded) {
+        write({ messageType: 'error', error: err instanceof Error ? err.message : String(err) });
+      }
+    } finally {
+      if (!res.writableEnded) res.end();
+    }
+  }
+
   /** Runs orchestrate + transforms to UI-friendly response with pipeline steps. */
   @Post('orchestrate-ui')
   async orchestrateUi(

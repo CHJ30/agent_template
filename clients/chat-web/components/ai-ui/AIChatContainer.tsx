@@ -205,7 +205,7 @@ export function AIChatContainer({
           ...e,
           streaming: false,
           intent: ev.intent ?? e.intent,
-          progress: 100,
+          progress: ev.status === "awaiting_review" ? e.progress : 100,
         }));
         if (ev.reportId) setLastReportId(ev.reportId);
         return;
@@ -300,6 +300,62 @@ export function AIChatContainer({
       sessionStorage.setItem("report_token", token);
       const reqId = (action.payload["reqId"] as string | undefined) ?? "";
       router.push(`/report?reqId=${encodeURIComponent(reqId)}`);
+      return;
+    }
+
+    // Summary HITL confirmation: resume the exact paused LangGraph thread.
+    // The textarea is optional; an empty confirmation (or cancel) lets the
+    // current report pass without running the human-refine node.
+    if (action.actionType === "confirmation" && action.componentId.startsWith("hitl-summary-")) {
+      if (loading) return;
+      const confirmed = action.payload["confirmed"] === true;
+      const comment = typeof action.payload["comment"] === "string"
+        ? action.payload["comment"].trim()
+        : "";
+      const resumeToken = typeof action.payload["resumeToken"] === "string"
+        ? action.payload["resumeToken"]
+        : "";
+      if (!resumeToken) {
+        setError("人工评审恢复标识缺失，请重新发起分析");
+        return;
+      }
+
+      const userText = confirmed && comment
+        ? `人工评审意见：${comment}`
+        : "不添加人工评审意见，当前报告直接通过";
+      addEntry({ id: crypto.randomUUID(), role: "user", text: userText });
+
+      const assistantId = crypto.randomUUID();
+      const mdId = `md-${assistantId}`;
+      addEntry({
+        id: assistantId,
+        role: "assistant",
+        components: [],
+        intent: "analyze",
+        progress: 90,
+        agentSteps: [],
+        streaming: true,
+      });
+
+      setError(null);
+      setLoading(true);
+      try {
+        let finalContent = "";
+        for await (const ev of streamOrchestrate(`${BASE}/api/agents/orchestrate-resume-stream`, {
+          threadId: resumeToken,
+          confirmed,
+          critique: comment,
+        })) {
+          applyStreamEvent(assistantId, mdId, ev);
+          if (ev.messageType === "done" && ev.content) finalContent = ev.content;
+        }
+        if (finalContent) onExchange?.(userText, finalContent);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+        updateAssistant(assistantId, (entry) => ({ ...entry, streaming: false }));
+      } finally {
+        setLoading(false);
+      }
       return;
     }
 
