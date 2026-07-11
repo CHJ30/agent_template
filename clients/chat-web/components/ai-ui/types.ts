@@ -48,6 +48,8 @@ export interface FormComponent {
   description?: string;
   fields: FormField[];
   submitLabel?: string;
+  resumeToken?: string;
+  interruptKind?: 'clarification';
 }
 
 export interface ConfirmationComponent {
@@ -59,6 +61,10 @@ export interface ConfirmationComponent {
   confirmLabel?: string;
   cancelLabel?: string;
   variant?: 'default' | 'warning' | 'danger';
+  inputLabel?: string;
+  inputPlaceholder?: string;
+  resumeToken?: string;
+  interruptKind?: 'summary_review';
 }
 
 export interface CardField {
@@ -199,7 +205,7 @@ export interface StreamEnvelope {
   component?: UnknownUIComponent;
   progress?: number;
   intent?: 'analyze' | 'query' | 'chat';
-  status?: 'completed' | 'needs_clarification' | 'failed';
+  status?: 'completed' | 'needs_clarification' | 'awaiting_review' | 'failed';
   reportId?: string;
   usedAgents?: string[];
   error?: string;

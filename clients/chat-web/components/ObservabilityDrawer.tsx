@@ -46,6 +46,22 @@ interface SessionData {
   sessionId: string;
   requests: RequestTrace[];
   last: RequestTrace | null;
+  costs: {
+    inputTokens: number;
+    outputTokens: number;
+    estimatedCostUsd: number;
+    records: CostRecord[];
+  };
+}
+
+interface CostRecord {
+  requestId: string;
+  nodeName: string;
+  modelName: string;
+  inputTokens: number;
+  outputTokens: number;
+  estimatedCostUsd: number;
+  createdAt: string;
 }
 
 // ─── prometheus-derived display model ────────────────────────────────────────
@@ -170,6 +186,7 @@ function fmtK(n: number): string {
   if (n >= 1_000)     return `${(n/1_000).toFixed(1)}K`;
   return String(n);
 }
+function usd(n: number): string { return `$${n.toFixed(6)}`; }
 function pct(part: number, total: number): string {
   return total === 0 ? "" : ` (${Math.round((part/total)*100)}%)`;
 }
@@ -204,7 +221,7 @@ function SectionHead({ title }: { title: string }) {
 // ─── session panel ────────────────────────────────────────────────────────────
 
 function SessionPanel({ data }: { data: SessionData }) {
-  const { requests, last } = data;
+  const { requests, last, costs } = data;
   const intentCounts: Record<string, number> = {};
   let totalMs = 0;
   for (const r of requests) {
@@ -221,9 +238,15 @@ function SessionPanel({ data }: { data: SessionData }) {
         {Object.entries(intentCounts).map(([intent, count]) => (
           <Kv key={intent} label={`意图 · ${INTENT_LABELS[intent] ?? intent}`} value={`${count} 次`} />
         ))}
+        <Kv label="估算输入 Token" value={fmtK(costs.inputTokens)} />
+        <Kv label="估算输出 Token" value={fmtK(costs.outputTokens)} />
+        <Kv label="估算成本" value={usd(costs.estimatedCostUsd)} />
       </div>
 
-      {last && <LastRequestPanel req={last} />}
+      {last && <LastRequestPanel
+        req={last}
+        costs={costs.records.filter((record) => record.requestId === last.requestId)}
+      />}
     </>
   );
 }
@@ -244,7 +267,7 @@ function LatencyBar({ ms: latencyMs, maxMs }: { ms: number; maxMs: number }) {
   );
 }
 
-function LastRequestPanel({ req }: { req: RequestTrace }) {
+function LastRequestPanel({ req, costs }: { req: RequestTrace; costs: CostRecord[] }) {
   const maxLatency = Math.max(...req.nodes.map(n => n.latencyMs), 1);
   const statusColor = STATUS_COLORS[req.status ?? ""] ?? "text-gray-500";
 
@@ -288,6 +311,20 @@ function LastRequestPanel({ req }: { req: RequestTrace }) {
                   {EXPERT_LABEL[name] ?? name}{t.error ? " ⚠" : ""}
                 </span>
                 <span className="text-xs font-mono text-gray-600">{fmtMs(t.durationMs)}</span>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {costs.length > 0 && (
+          <div className="mt-2 border-t border-gray-200 pt-2">
+            <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-gray-400">节点成本估算</div>
+            {costs.map((cost, index) => (
+              <div key={`${cost.nodeName}-${index}`} className="flex items-center justify-between py-0.5">
+                <span className="truncate text-xs text-gray-500" title={cost.modelName}>{cost.nodeName}</span>
+                <span className="text-xs font-mono text-gray-600">
+                  {fmtK(cost.inputTokens)} / {fmtK(cost.outputTokens)} · {usd(cost.estimatedCostUsd)}
+                </span>
               </div>
             ))}
           </div>

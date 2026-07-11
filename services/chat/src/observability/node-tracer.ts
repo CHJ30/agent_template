@@ -34,7 +34,7 @@ export interface RequestTrace {
   reviseCount: number;
   nodes: NodeTrace[];
   expertTimings?: Record<string, ExpertTiming>;
-  status?: 'completed' | 'needs_clarification' | 'failed' | 'error';
+  status?: 'completed' | 'needs_clarification' | 'awaiting_review' | 'failed' | 'error';
 }
 
 const MAX_SESSIONS = 200;
@@ -47,6 +47,8 @@ const LABELS: Record<string, string> = {
   analysisStep: '多维度分析',
   riskStep:     '风险评估',
   summaryStep:  '报告生成',
+  humanReviewStep: '人工评审',
+  humanRefineStep: '人工意见修订',
   queryHandler: '需求查询',
   chatHandler:  '闲聊对话',
 };

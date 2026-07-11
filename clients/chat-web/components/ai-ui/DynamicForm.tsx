@@ -112,7 +112,11 @@ export function DynamicForm({ component, onAction, disabled = false }: Props) {
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    onAction({ actionType: "form_submit", componentId: component.id, payload: values });
+    onAction({
+      actionType: "form_submit",
+      componentId: component.id,
+      payload: { ...values, resumeToken: component.resumeToken },
+    });
   }
 
   return (

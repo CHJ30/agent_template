@@ -1,4 +1,13 @@
-import { Annotation, MessagesAnnotation, StateGraph, START, END, MemorySaver } from '@langchain/langgraph';
+import {
+  Annotation,
+  MessagesAnnotation,
+  StateGraph,
+  START,
+  END,
+  MemorySaver,
+  interrupt,
+  type BaseCheckpointSaver,
+} from '@langchain/langgraph';
 import { HumanMessage, SystemMessage } from '@langchain/core/messages';
 import { ChatOpenAI } from '@langchain/openai';
 import { z } from 'zod';
@@ -60,6 +69,7 @@ export const RequirementAnalysisState = Annotation.Root({
   intent:            Annotation<'analyze' | 'query' | 'chat'>({ reducer: (_, b) => b, default: () => 'analyze' }),
   extracted:         Annotation<string>({ reducer: (_, b) => b, default: () => '' }),
   clarified:         Annotation<string>({ reducer: (_, b) => b, default: () => '' }),
+  clarificationAnswers: Annotation<Record<string, string>>({ reducer: (_, b) => b, default: () => ({}) }),
   analysisResult:    Annotation<string>({ reducer: (_, b) => b, default: () => '' }),
   toolLoopCount:     Annotation<number>({ reducer: (_, b) => b, default: () => 0  }),
   risk:              Annotation<string>({ reducer: (_, b) => b, default: () => '' }),
@@ -70,6 +80,11 @@ export const RequirementAnalysisState = Annotation.Root({
   nodeErrors:        Annotation<string[]>({ reducer: (a, b) => [...a, ...(b ?? [])], default: () => [] }),
   critique:          Annotation<string>({ reducer: (_, b) => b, default: () => '' }),
   reviseCount:       Annotation<number>({ reducer: (_, b) => b, default: () => 0  }),
+  // HITL is opt-in so non-interactive callers (tests, batch jobs, pipeline)
+  // continue to run to completion without waiting for a browser response.
+  humanReviewEnabled:  Annotation<boolean>({ reducer: (_, b) => b, default: () => false }),
+  humanReviewThreadId: Annotation<string>({ reducer: (_, b) => b, default: () => '' }),
+  humanReviewAccepted: Annotation<boolean>({ reducer: (_, b) => b, default: () => false }),
   // ── 9.2 Supervisor + expert fields (populated when supervisor sub-graph runs) ──
   activeExperts:       Annotation<string[]>({ reducer: (_, b) => b, default: () => [] }),
   functionalAnalysis:  Annotation<string>({ reducer: (_, b) => b, default: () => '' }),
@@ -218,6 +233,47 @@ const REFINE_SYSTEM = `你是需求分析师。根据评审意见修订报告。
 - 不要重新生成整个报告
 - 不要删除正确的内容
 - 不要改变原有的结构和风格`;
+
+interface SummaryReviewInterrupt {
+  type: 'confirmation';
+  id: string;
+  title: string;
+  summary: string;
+  details: string[];
+  confirmLabel: string;
+  cancelLabel: string;
+  variant: 'default';
+  inputLabel: string;
+  inputPlaceholder: string;
+  resumeToken: string;
+  interruptKind: 'summary_review';
+}
+
+interface SummaryReviewResume {
+  confirmed: boolean;
+}
+
+interface ClarificationInterrupt {
+  type: 'form';
+  id: string;
+  title: string;
+  description: string;
+  fields: Array<{
+    name: string;
+    label: string;
+    fieldType: 'textarea';
+    required: boolean;
+    rows: number;
+    placeholder: string;
+  }>;
+  submitLabel: string;
+  resumeToken: string;
+  interruptKind: 'clarification';
+}
+
+interface ClarificationResume {
+  answers: Record<string, string>;
+}
 
 // NOTE: every property here must be present in `required` for OpenAI's strict
 // structured-output mode (json_schema strict:true) — `.optional()` fields get
@@ -375,6 +431,58 @@ function buildNodes(model: ChatOpenAI) {
     }
   };
 
+  const clarificationReviewNode = (state: RequirementState): Partial<RequirementState> => {
+    if (!state.humanReviewEnabled || state.skipClarification) return {};
+
+    let questions: string[] = [];
+    try {
+      const parsed = JSON.parse(
+        state.clarified.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, ''),
+      ) as { questions?: unknown };
+      if (Array.isArray(parsed.questions)) {
+        questions = parsed.questions.filter((item): item is string =>
+          typeof item === 'string' && item.trim().length > 0,
+        );
+      }
+    } catch {
+      // Use stable fallback questions below.
+    }
+    if (questions.length === 0) {
+      questions = [
+        '目标用户是谁？',
+        '核心功能点有哪些？',
+        '是否有明确的性能、安全或合规约束？',
+        '需求优先级是什么（P0/P1/P2/P3）？',
+      ];
+    }
+
+    const resumeValue = interrupt<ClarificationInterrupt, ClarificationResume>({
+      type: 'form',
+      id: `form-clarify-${state.humanReviewThreadId}`,
+      title: '需要补充信息',
+      description: '请回答以下问题。该表单已持久化，刷新页面后仍可继续。',
+      fields: questions.map((question, index) => ({
+        name: `q${index}`,
+        label: question,
+        fieldType: 'textarea',
+        required: false,
+        rows: 2,
+        placeholder: '请在此输入您的回答…',
+      })),
+      submitLabel: '提交补充信息并继续分析',
+      resumeToken: state.humanReviewThreadId,
+      interruptKind: 'clarification',
+    });
+    const answers = resumeValue.answers ?? {};
+    const answerText = questions
+      .map((question, index) => `${question}\n${answers[`q${index}`]?.trim() || '未补充'}`)
+      .join('\n\n');
+    return {
+      clarificationAnswers: answers,
+      extracted: `${state.extracted}\n\n用户补充信息：\n${answerText}`,
+    };
+  };
+
   // ── 9.2 Supervisor + multi-expert sub-graph (replaces single-agent ReAct) ──
   // Original single-agent version kept below for reference:
   //   const subGraph = createAnalysisSubGraph(model);
@@ -454,6 +562,64 @@ function buildNodes(model: ChatOpenAI) {
     }
   };
 
+  // ── Human review (HITL) ─────────────────────────────────────────────────────
+  // Keep the interrupt in the parent graph rather than inside summarySubGraph.
+  // A Command.update sent to the parent checkpoint is then visible when this
+  // node restarts on resume; an update cannot directly mutate a paused nested
+  // subgraph's private checkpoint state.
+  const humanReviewNode = (state: RequirementState): Partial<RequirementState> => {
+    if (!state.humanReviewEnabled) {
+      return { humanReviewAccepted: false, critique: '' };
+    }
+
+    const resumeValue = interrupt<SummaryReviewInterrupt, true | SummaryReviewResume>({
+      type: 'confirmation',
+      id: `hitl-summary-${state.humanReviewThreadId}`,
+      title: '是否加入人工评审意见？',
+      summary: '可填写您对当前报告的评审意见；留空提交将自动通过。',
+      details: [
+        '填写意见并确认：系统将按意见修订报告。',
+        '留空确认或选择不添加：当前报告直接通过。',
+      ],
+      confirmLabel: '确认并继续',
+      cancelLabel: '不添加，直接通过',
+      variant: 'default',
+      inputLabel: '人工评审意见（可选）',
+      inputPlaceholder: '例如：请补充数据迁移风险，并明确第二阶段的依赖关系。',
+      resumeToken: state.humanReviewThreadId,
+      interruptKind: 'summary_review',
+    });
+    const accepted = resumeValue === true || resumeValue.confirmed;
+
+    // `critique` has already been updated atomically by the resume Command.
+    // A rejected confirmation means "do not add a review", so clear it.
+    return {
+      humanReviewAccepted: accepted,
+      critique: accepted ? state.critique.trim() : '',
+    };
+  };
+
+  const humanRefineNode = async (state: RequirementState): Promise<Partial<RequirementState>> => {
+    const response = await invokeWithRetry(
+      () => model.invoke([
+        new SystemMessage(REFINE_SYSTEM),
+        new HumanMessage(
+          `原报告：\n\n${state.summary}\n\n人工评审意见：\n\n${state.critique}\n\n` +
+          '请根据人工评审意见修订报告，只改有问题的地方，并返回修订后的完整报告。',
+        ),
+      ]),
+      'human_refine',
+    );
+    const summary = typeof response.content === 'string'
+      ? response.content
+      : JSON.stringify(response.content);
+    return {
+      summary,
+      critique: '',
+      reviseCount: state.reviseCount + 1,
+    };
+  };
+
   // ── query handler ─────────────────────────────────────────────────────────────
   const queryHandlerNode = async (state: RequirementState): Promise<Partial<RequirementState>> => {
     const input = String(state.messages.at(-1)?.content ?? '');
@@ -502,35 +668,52 @@ function buildNodes(model: ChatOpenAI) {
   };
 
   return {
-    classifierNode, extractNode, clarifyNode, analysisNode, riskNode, summaryNode,
-    queryHandlerNode, chatHandlerNode,
+    classifierNode, extractNode, clarifyNode, clarificationReviewNode,
+    analysisNode, riskNode, summaryNode,
+    humanReviewNode, humanRefineNode, queryHandlerNode, chatHandlerNode,
   };
+}
+
+function routeAfterHumanReview(state: RequirementState): string {
+  return state.humanReviewAccepted && state.critique.trim()
+    ? 'humanRefineStep'
+    : END;
 }
 
 // ─── Graph factory ────────────────────────────────────────────────────────────
 
-export function createAnalysisGraph(model: ChatOpenAI, checkpointer?: MemorySaver) {
+export function createAnalysisGraph(model: ChatOpenAI, checkpointer?: BaseCheckpointSaver) {
   const {
-    classifierNode, extractNode, clarifyNode, analysisNode, riskNode, summaryNode,
-    queryHandlerNode, chatHandlerNode,
+    classifierNode, extractNode, clarifyNode, clarificationReviewNode,
+    analysisNode, riskNode, summaryNode,
+    humanReviewNode, humanRefineNode, queryHandlerNode, chatHandlerNode,
   } = buildNodes(model);
 
   return new StateGraph(RequirementAnalysisState)
     .addNode('classifier',   classifierNode)
     .addNode('extractStep',  extractNode)
     .addNode('clarifyStep',  clarifyNode)
+    .addNode('clarificationReviewStep', clarificationReviewNode)
     .addNode('analysisStep', analysisNode)
     .addNode('riskStep',     riskNode)
     .addNode('summaryStep',  summaryNode)
+    .addNode('humanReviewStep', humanReviewNode)
+    .addNode('humanRefineStep', humanRefineNode)
     .addNode('queryHandler', queryHandlerNode)
     .addNode('chatHandler',  chatHandlerNode)
     .addEdge(START, 'classifier')
     .addConditionalEdges('classifier', routeByIntent)
     .addEdge('extractStep',  'clarifyStep')
-    .addEdge('clarifyStep',  'analysisStep')
+    .addEdge('clarifyStep',  'clarificationReviewStep')
+    .addEdge('clarificationReviewStep', 'analysisStep')
     .addEdge('analysisStep', 'riskStep')
     .addEdge('riskStep',     'summaryStep')
-    .addEdge('summaryStep',  END)
+    .addEdge('summaryStep',  'humanReviewStep')
+    .addConditionalEdges('humanReviewStep', routeAfterHumanReview, {
+      [END]:             END,
+      humanRefineStep: 'humanRefineStep',
+    })
+    .addEdge('humanRefineStep', END)
     .addEdge('queryHandler', END)
     .addEdge('chatHandler',  END)
     .compile({ checkpointer });
@@ -554,7 +737,7 @@ export async function runAnalysisGraph(
 // Returns PostgresSaver when DATABASE_URL is set; falls back to MemorySaver so
 // the app stays runnable without Postgres in development.
 
-export async function createPostgresSaver(): Promise<MemorySaver> {
+export async function createPostgresSaver(): Promise<BaseCheckpointSaver> {
   const connString = process.env.DATABASE_URL;
   if (!connString) {
     log.warn('checkpointer_fallback_memory_no_database_url');
@@ -562,11 +745,13 @@ export async function createPostgresSaver(): Promise<MemorySaver> {
   }
   try {
     const { PostgresSaver } = await import('@langchain/langgraph-checkpoint-postgres');
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const saver = (PostgresSaver as any).fromConnString(connString);
+    const saver = PostgresSaver.fromConnString(connString);
     await saver.setup();
     log.info('checkpointer_postgres_ready');
-    return saver;
+    // The packages resolve the same @langchain/core types through different
+    // ESM resolution-mode paths, so TypeScript sees nominally distinct saver
+    // bases even though PostgresSaver is runtime-compatible with LangGraph.
+    return saver as unknown as BaseCheckpointSaver;
   } catch (e) {
     log.warn(
       { err: e instanceof Error ? e.message : String(e) },

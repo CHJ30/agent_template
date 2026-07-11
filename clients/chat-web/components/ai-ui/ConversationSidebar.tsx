@@ -8,6 +8,7 @@ export interface Conversation {
   title: string;
   createdAt: string;
   updatedAt: string;
+  runStatus?: "idle" | "running" | "ready";
 }
 
 interface Props {
@@ -68,6 +69,12 @@ export function ConversationSidebar({ token, activeId, onSelect, onCreated, onDe
   // Reload whenever the logged-in user (token) changes.
   useEffect(() => { void refresh(); }, [refresh]);
 
+  // Keep run indicators current while the user stays on another page/thread.
+  useEffect(() => {
+    const timer = window.setInterval(() => { void refresh(); }, 2000);
+    return () => window.clearInterval(timer);
+  }, [refresh]);
+
   async function handleNew() {
     setError(null);
     try {
@@ -120,7 +127,18 @@ export function ConversationSidebar({ token, activeId, onSelect, onCreated, onDe
               activeId === c.id ? "bg-blue-50 text-blue-700" : "text-gray-600 hover:bg-gray-50",
             ].join(" ")}
           >
-            <span className="flex-1 truncate">{c.title}</span>
+            <span className="flex min-w-0 flex-1 items-center gap-2">
+              {(c.runStatus === "running" || c.runStatus === "ready") && (
+                <span
+                  className={[
+                    "h-2 w-2 shrink-0 rounded-full",
+                    c.runStatus === "running" ? "animate-pulse bg-blue-500" : "bg-green-500",
+                  ].join(" ")}
+                  title={c.runStatus === "running" ? "分析运行中" : "已完成或等待用户输入"}
+                />
+              )}
+              <span className="truncate">{c.title}</span>
+            </span>
             <button
               onClick={(e) => void handleDelete(c.id, e)}
               className="hidden shrink-0 rounded px-1.5 py-0.5 text-red-500 hover:bg-red-50 group-hover:block"

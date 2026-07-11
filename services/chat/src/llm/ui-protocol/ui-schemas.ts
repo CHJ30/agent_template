@@ -49,6 +49,8 @@ export const formComponentSchema = z.object({
   description: z.string().optional(),
   fields: z.array(formFieldSchema),
   submitLabel: z.string().optional(),
+  resumeToken: z.string().optional(),
+  interruptKind: z.literal('clarification').optional(),
 });
 
 export const confirmationComponentSchema = z.object({
@@ -60,6 +62,10 @@ export const confirmationComponentSchema = z.object({
   confirmLabel: z.string().optional(),
   cancelLabel: z.string().optional(),
   variant: z.enum(['default', 'warning', 'danger']).optional(),
+  inputLabel: z.string().optional(),
+  inputPlaceholder: z.string().optional(),
+  resumeToken: z.string().optional(),
+  interruptKind: z.literal('summary_review').optional(),
 });
 
 export const cardFieldSchema = z.object({
