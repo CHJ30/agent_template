@@ -31,6 +31,7 @@ import type { SupervisorTestResult } from '../graph/supervisor-test-cases.js';
 import { createLogger } from '../../observability/logger.js';
 import { nodeTracer } from '../../observability/node-tracer.js';
 import type { ExpertTiming, NodeTrace } from '../../observability/node-tracer.js';
+import { CostTrackingService } from '../cost/cost-tracking.service.js';
 
 const log = createLogger('orchestrator');
 
@@ -211,22 +212,56 @@ function parseJson(text: string): any {
   }
 }
 
+function stringifyForCost(value: unknown): string {
+  try { return JSON.stringify(value); } catch { return String(value ?? ''); }
+}
+
+function sessionIdFromRequestId(requestId: string): string {
+  const separator = requestId.lastIndexOf(':');
+  return separator > 0 ? requestId.slice(0, separator) : requestId;
+}
+
 @Injectable()
 export class OrchestratorService {
   private readonly model: ChatOpenAI;
+  private readonly modelName: string;
   private readonly analysisGraphPromise: Promise<ReturnType<typeof createAnalysisGraph>>;
 
   constructor(
     @Inject(LLM_CONFIG) config: LlmConfig,
     private readonly requirementReportService: RequirementReportService,
+    private readonly costTrackingService: CostTrackingService,
   ) {
     this.model = createChatModel(config);
+    this.modelName = config.llm.modelName;
     // The same saver and compiled graph must live across HTTP requests so an
     // interrupt raised by one request can be resumed by the user's next click.
     // Postgres keeps pending reviews durable across restarts; local development
     // transparently falls back to MemorySaver when DATABASE_URL is unavailable.
     this.analysisGraphPromise = createPostgresSaver()
       .then((checkpointer) => createAnalysisGraph(this.model, checkpointer));
+  }
+
+  private async recordEstimatedNodeCost(
+    sessionId: string,
+    requestId: string,
+    nodeName: string,
+    messages: string,
+    output: unknown,
+  ): Promise<void> {
+    try {
+      await this.costTrackingService.recordNode({
+        sessionId,
+        requestId,
+        nodeName,
+        modelName: this.modelName,
+        systemPrompt: `LangGraph node: ${nodeName}`,
+        messages,
+        outputText: stringifyForCost(output),
+      });
+    } catch (error) {
+      log.warn({ nodeName, error: error instanceof Error ? error.message : String(error) }, 'cost_record_failed');
+    }
   }
 
   async orchestrate(input: string, skipClarification = false): Promise<OrchestratorResult> {
@@ -454,6 +489,13 @@ export class OrchestratorService {
         }
 
         const [nodeName, update] = Object.entries(chunk as Record<string, Partial<RequirementState>>)[0];
+        await this.recordEstimatedNodeCost(
+          sessionId,
+          requestId,
+          nodeName,
+          stringifyForCost({ input: augmentedInput, state: finalState }),
+          update,
+        );
         finalState = { ...finalState, ...update };
         if (update.nodeErrors?.length) nodeErrors.push(...update.nodeErrors);
         usedAgents.push(nodeName);
@@ -647,6 +689,16 @@ export class OrchestratorService {
         config,
       );
 
+      if (confirmed && normalizedCritique) {
+        await this.recordEstimatedNodeCost(
+          sessionIdFromRequestId(threadId),
+          threadId,
+          'humanRefineStep',
+          stringifyForCost({ summary: checkpointState.summary, critique: normalizedCritique }),
+          { summary: state.summary },
+        );
+      }
+
       yield { messageType: 'agent_end', agent: 'humanReviewStep', label: AGENT_LABELS.humanReviewStep };
       if (confirmed && normalizedCritique) {
         yield { messageType: 'agent_start', agent: 'humanRefineStep', label: AGENT_LABELS.humanRefineStep };
@@ -783,6 +835,13 @@ export class OrchestratorService {
           chunk as Record<string, Partial<RequirementState>>,
         )[0] ?? [];
         if (!nodeName || !update) continue;
+        await this.recordEstimatedNodeCost(
+          sessionIdFromRequestId(threadId),
+          threadId,
+          nodeName,
+          stringifyForCost({ answers, state: finalState }),
+          update,
+        );
         finalState = { ...finalState, ...update };
         completed += 1;
         yield { messageType: 'agent_end', agent: nodeName, label: AGENT_LABELS[nodeName] ?? nodeName };

@@ -103,3 +103,22 @@ model pipeline_test_cases {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 }
+
+model llm_cost_records {
+  id               String   @id @default(cuid())
+  sessionId        String
+  requestId        String
+  nodeName         String
+  modelName        String
+  systemPrompt     String
+  toolSchemas      String?
+  messages         String?
+  outputText       String
+  inputTokens      Int
+  outputTokens     Int
+  estimatedCostUsd Float
+  createdAt        DateTime @default(now())
+
+  @@index([sessionId, createdAt])
+  @@index([requestId])
+}
