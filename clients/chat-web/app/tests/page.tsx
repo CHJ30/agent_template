@@ -35,6 +35,18 @@ const TEST_PAGES = [
     description: "规划执行、多专家调度与反思重试的联合分析流水线。",
   },
   {
+    id: "token-usage",
+    label: "Token 用量统计",
+    href: "/token-usage",
+    description: "按月、Graph 节点和 Agent 展示模型 Token 与成本统计。",
+  },
+  {
+    id: "context",
+    label: "上下文压缩测试",
+    href: "/context-test",
+    description: "消息窗口裁剪、工具调用精确配对和对话摘要压缩测试。",
+  },
+  {
     id: "production",
     label: "生产环境加固测试",
     href: "/production-test",
