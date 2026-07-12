@@ -4,6 +4,7 @@ import { OrchestratorService, TEST_CASES, ANALYSIS_TEST_CASES, SUPERVISOR_TEST_C
 import type { UIResponse, StreamEnvelope } from './orchestrator.service.js';
 import { RequirementReportService } from './requirement-report.service.js';
 import { MessageService } from '../../message/message.service.js';
+import { CONTEXT_TEST_CASES, runContextTestCase } from '../context/context-test-runner.js';
 
 @Controller('api/agents')
 export class AgentsController {
@@ -30,6 +31,16 @@ export class AgentsController {
   @Get('ping')
   ping() {
     return this.orchestratorService.ping();
+  }
+
+  @Get('context-test/cases')
+  getContextTestCases() {
+    return CONTEXT_TEST_CASES;
+  }
+
+  @Post('context-test/run')
+  runContextTest(@Body() body: { caseId: number }) {
+    return runContextTestCase(body.caseId);
   }
 
   /** Returns test-case metadata (no LLM calls) — used by the frontend to render cards. */
