@@ -86,6 +86,13 @@ interface MetricsSnapshot {
   fetchedAt: Date;
 }
 
+interface TokenBudgetStats {
+  monthly: { totalCost: number; totalInputTokens: number; totalOutputTokens: number; totalCachedTokens: number; calls: number };
+}
+interface BudgetDecision { action: "allow" | "downgrade" | "reject"; reason: string; }
+const FIXED_MONTHLY_BUDGET = 100;
+const FIXED_BUDGET_AGENTS = ['functional', 'security_expert', 'compliance_expert'] as const;
+
 // ─── parsing helpers ──────────────────────────────────────────────────────────
 
 function parseMetrics(families: MetricFamily[]): MetricsSnapshot {
@@ -167,6 +174,12 @@ async function fetchSession(sessionId: string): Promise<SessionData | null> {
   const res = await fetch(`/api/observability/session?sessionId=${encodeURIComponent(sessionId)}`);
   if (!res.ok) return null;
   return res.json() as Promise<SessionData>;
+}
+
+async function fetchTokenBudgetStats(): Promise<TokenBudgetStats> {
+  const res = await fetch("/api/token-usage/stats", { cache: "no-store" });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json() as Promise<TokenBudgetStats>;
 }
 
 // ─── formatting ───────────────────────────────────────────────────────────────
@@ -380,6 +393,8 @@ export function ObservabilityDrawer({ sessionId }: Props) {
   const [metrics, setMetrics]     = useState<MetricsSnapshot | null>(null);
   const [session, setSession]     = useState<SessionData | null>(null);
   const [error, setError]         = useState<string | null>(null);
+  const [tokenBudget, setTokenBudget] = useState<TokenBudgetStats | null>(null);
+  const [budgetDecisions, setBudgetDecisions] = useState<Record<string, BudgetDecision>>({});
   const intervalRef               = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
@@ -387,9 +402,10 @@ export function ObservabilityDrawer({ sessionId }: Props) {
 
     const load = async () => {
       try {
-        const [m, s] = await Promise.all([fetchMetrics(), fetchSession(sessionId)]);
+        const [m, s, b] = await Promise.all([fetchMetrics(), fetchSession(sessionId), fetchTokenBudgetStats()]);
         setMetrics(m);
         setSession(s);
+        setTokenBudget(b);
         setError(null);
       } catch (e: unknown) {
         setError(e instanceof Error ? e.message : String(e));
@@ -400,6 +416,22 @@ export function ObservabilityDrawer({ sessionId }: Props) {
     intervalRef.current = setInterval(load, 3000);
     return () => { if (intervalRef.current) clearInterval(intervalRef.current); };
   }, [open, sessionId]);
+
+  const budgetPercent = tokenBudget
+    ? (tokenBudget.monthly.totalCost / FIXED_MONTHLY_BUDGET) * 100
+    : 0;
+  const cachedInputPercent = tokenBudget && tokenBudget.monthly.totalInputTokens > 0
+    ? (tokenBudget.monthly.totalCachedTokens / tokenBudget.monthly.totalInputTokens) * 100
+    : 0;
+
+  useEffect(() => {
+    if (!open || !tokenBudget) return;
+    void Promise.all(FIXED_BUDGET_AGENTS.map(async agentName => {
+      const response = await fetch(`/api/token-usage/budget-action?budgetUsedPercent=${encodeURIComponent(budgetPercent)}&agentName=${encodeURIComponent(agentName)}`);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return [agentName, await response.json() as BudgetDecision] as const;
+    })).then(entries => setBudgetDecisions(Object.fromEntries(entries))).catch(() => setBudgetDecisions({}));
+  }, [budgetPercent, open, tokenBudget]);
 
   const hasAlerts =
     (session?.last?.status === "failed" || session?.last?.status === "error") ||
@@ -478,6 +510,52 @@ export function ObservabilityDrawer({ sessionId }: Props) {
           {/* ── Metrics tab ───────────────────────────────────────────── */}
           {metrics && tab === "metrics" && (
             <>
+              <SectionHead title="月度预算策略" />
+              <div className="mb-3 rounded-lg border border-indigo-100 bg-indigo-50 px-3 py-3">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="font-semibold text-indigo-900">固定月度预算</span>
+                  <span className="font-mono font-semibold text-indigo-700">$100.00</span>
+                </div>
+                <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-white">
+                  <div className={`h-full ${budgetPercent >= 100 ? 'bg-red-500' : budgetPercent >= 80 ? 'bg-amber-500' : 'bg-emerald-500'}`} style={{ width: `${Math.min(100, budgetPercent)}%` }} />
+                </div>
+                <div className="mt-2 text-[10px] text-gray-500">
+                  ${tokenBudget?.monthly.totalCost.toFixed(6) ?? '0.000000'} / $100.00 · {budgetPercent.toFixed(2)}%
+                </div>
+                <div className="mt-1 flex items-center justify-between rounded bg-white/70 px-2 py-1.5 text-[10px]">
+                  <span className="text-gray-500">缓存命中率</span>
+                  <span className="font-mono font-semibold text-indigo-700">
+                    {cachedInputPercent.toFixed(2)}% · {fmtK(tokenBudget?.monthly.totalCachedTokens ?? 0)} cached
+                  </span>
+                </div>
+                <div className="mt-2 space-y-1">
+                  {FIXED_BUDGET_AGENTS.map(agentName => {
+                    const decision = budgetDecisions[agentName];
+                    return <div key={agentName} className="flex items-center justify-between rounded bg-white/80 px-2 py-1.5 text-[10px]">
+                      <span className="font-mono text-gray-600">{agentName}</span>
+                      <span className={decision?.action === 'reject' ? 'font-semibold text-red-600' : decision?.action === 'downgrade' ? 'font-semibold text-amber-600' : 'font-semibold text-emerald-600'}>
+                        {decision?.action.toUpperCase() ?? '—'}
+                      </span>
+                    </div>;
+                  })}
+                </div>
+                <div className="mt-2 grid gap-1.5 text-[9px]">
+                  <div className="rounded border border-amber-200 bg-amber-50 px-2 py-1.5 text-amber-800">
+                    <div className="mb-0.5 font-semibold">预算紧张 80%～100%</div>
+                    <div>functional：DOWNGRADE</div>
+                    <div>security_expert：ALLOW</div>
+                    <div>compliance_expert：ALLOW</div>
+                  </div>
+                  <div className="rounded border border-red-200 bg-red-50 px-2 py-1.5 text-red-700">
+                    <div className="mb-0.5 font-semibold">预算超额 ≥100%</div>
+                    <div>functional：REJECT</div>
+                    <div>security_expert：REJECT</div>
+                    <div>compliance_expert：REJECT</div>
+                  </div>
+                </div>
+                <p className="mt-2 text-[9px] leading-4 text-gray-400">gpt-4o-mini 已是最低档，DOWNGRADE 只记录原因、不切换模型。compressor 用于减少上下文成本，即使超过预算也始终允许执行。</p>
+              </div>
+
               <SectionHead title={`LLM 模型 (${metrics.models.length})`} />
               {metrics.models.length === 0
                 ? <p className="text-xs text-gray-400 mb-3">暂无 LLM 调用</p>

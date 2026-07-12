@@ -19,6 +19,7 @@ import {
 import { createAnalysisSubGraph } from './analysis-sub-graph.js';
 import { createAnalysisSupervisorSubGraph } from './experts.js';
 import { createLogger } from '../../observability/logger.js';
+import { runWithRuntimeCostPolicy, type RuntimeCostPolicy } from '../cost/runtime-cost-policy.js';
 
 const log = createLogger('requirement-graph');
 
@@ -286,18 +287,18 @@ const criticSchema = z.object({
   critique: z.string().describe('不通过时的修改意见，通过时为空'),
 });
 
-export function createSummarySubGraph(model: ChatOpenAI) {
+export function createSummarySubGraph(model: ChatOpenAI, runtime?: RuntimeCostPolicy) {
   const actorNode = async (state: RequirementState): Promise<Partial<RequirementState>> => {
     const input = String(state.messages.at(-1)?.content ?? '');
     log.debug({ inputChars: input.length }, 'actor_start');
     const response = await invokeWithRetry(
-      () => model.invoke([
+      () => runWithRuntimeCostPolicy({ runtime, nodeName: 'actor', agentName: 'summary_agent', threadId: state.humanReviewThreadId, fn: () => model.invoke([
         new SystemMessage(ACTOR_SYSTEM),
         new HumanMessage(
           `原始需求：${input}\n\n提取结果：${state.extracted}\n\n` +
           `分析结果：${state.analysisResult}\n\n风险评估：${state.risk}\n\n请生成完整的综合报告。`,
         ),
-      ]),
+      ]) }),
       'actor',
     );
     const summary = typeof response.content === 'string'
@@ -312,10 +313,10 @@ export function createSummarySubGraph(model: ChatOpenAI) {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const structured = (model as any).withStructuredOutput(criticSchema);
     const result = await invokeWithRetry(
-      () => structured.invoke([
+      () => runWithRuntimeCostPolicy({ runtime, nodeName: 'critic', agentName: 'critic', threadId: state.humanReviewThreadId, fn: () => structured.invoke([
         new SystemMessage(CRITIC_SYSTEM),
         new HumanMessage(`待评审报告：\n\n${state.summary}\n\n请按标准评审。`),
-      ]),
+      ]) }),
       'critic',
     ) as z.infer<typeof criticSchema>;
     log.debug({ pass: result.pass, critique: result.critique }, 'critic_result');
@@ -325,13 +326,13 @@ export function createSummarySubGraph(model: ChatOpenAI) {
   const refineNode = async (state: RequirementState): Promise<Partial<RequirementState>> => {
     log.debug({ reviseCount: state.reviseCount, critiqueChars: state.critique.length }, 'refine_start');
     const response = await invokeWithRetry(
-      () => model.invoke([
+      () => runWithRuntimeCostPolicy({ runtime, nodeName: 'refine', agentName: 'summary_agent', threadId: state.humanReviewThreadId, fn: () => model.invoke([
         new SystemMessage(REFINE_SYSTEM),
         new HumanMessage(
           `原报告：\n\n${state.summary}\n\n评审意见：\n\n${state.critique}\n\n` +
           `请根据评审意见修订报告，只改有问题的地方。`,
         ),
-      ]),
+      ]) }),
       'refine',
     );
     const newCount = state.reviseCount + 1;
@@ -378,7 +379,9 @@ export function createSummarySubGraph(model: ChatOpenAI) {
 
 // ─── Nodes ─────────────────────────────────────────────────────────────────────
 
-function buildNodes(model: ChatOpenAI) {
+function buildNodes(model: ChatOpenAI, runtime?: RuntimeCostPolicy) {
+  const tracked = <T>(state: RequirementState, nodeName: string, agentName: string, fn: () => Promise<T>) =>
+    runWithRuntimeCostPolicy({ runtime, nodeName, agentName, threadId: state.humanReviewThreadId, fn });
   // ── classifier ───────────────────────────────────────────────────────────────
   const classifierNode = async (state: RequirementState): Promise<Partial<RequirementState>> => {
     const input = String(state.messages.at(-1)?.content ?? '');
@@ -386,10 +389,10 @@ function buildNodes(model: ChatOpenAI) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const classifierModel = (model as any).withStructuredOutput(intentSchema);
       const result = await invokeWithRetry(
-        () => classifierModel.invoke([
+        () => tracked(state, 'classifier', 'supervisor', () => classifierModel.invoke([
           new SystemMessage(CLASSIFIER_SYSTEM),
           new HumanMessage(input),
-        ]),
+        ])),
         'classifier',
       ) as z.infer<typeof intentSchema>;
       const validIntents = ['analyze', 'query', 'chat'] as const;
@@ -407,7 +410,7 @@ function buildNodes(model: ChatOpenAI) {
     const input = String(state.messages.at(-1)?.content ?? '');
     try {
       const extracted = await invokeWithRetry(
-        () => createExtractAgent(model).invoke({ input }),
+        () => tracked(state, 'extractStep', 'functional', () => createExtractAgent(model).invoke({ input })),
         'extract',
       );
       return { extracted };
@@ -421,7 +424,7 @@ function buildNodes(model: ChatOpenAI) {
     if (state.skipClarification) return {};
     try {
       const clarified = await invokeWithRetry(
-        () => createClarifyAgent(model).invoke({ extractedRequirement: state.extracted }),
+        () => tracked(state, 'clarifyStep', 'functional', () => createClarifyAgent(model).invoke({ extractedRequirement: state.extracted })),
         'clarify',
       );
       return { clarified };
@@ -487,7 +490,7 @@ function buildNodes(model: ChatOpenAI) {
   // Original single-agent version kept below for reference:
   //   const subGraph = createAnalysisSubGraph(model);
   //   subGraph.invoke({ messages: [...], toolLoopCount: 0, analysisResult: '' })
-  const supervisorSubGraph = createAnalysisSupervisorSubGraph(model);
+  const supervisorSubGraph = createAnalysisSupervisorSubGraph(model, { runtime });
   const analysisNode = async (state: RequirementState): Promise<Partial<RequirementState>> => {
     try {
       const result = await supervisorSubGraph.invoke({
@@ -498,6 +501,7 @@ function buildNodes(model: ChatOpenAI) {
         securityAnalysis:    '',
         complianceAnalysis:  '',
         analysisResult:      '',
+        threadId:             state.humanReviewThreadId,
       });
       return {
         analysisResult:      result.analysisResult,
@@ -519,7 +523,7 @@ function buildNodes(model: ChatOpenAI) {
   const riskNode = async (state: RequirementState): Promise<Partial<RequirementState>> => {
     try {
       const risk = await invokeWithRetry(
-        () => createRiskAgent(model).invoke({ extractedRequirement: state.extracted }),
+        () => tracked(state, 'riskStep', 'risk_agent', () => createRiskAgent(model).invoke({ extractedRequirement: state.extracted })),
         'risk',
       );
       return { risk };
@@ -529,7 +533,7 @@ function buildNodes(model: ChatOpenAI) {
     }
   };
 
-  const summarySubGraph = createSummarySubGraph(model);
+  const summarySubGraph = createSummarySubGraph(model, runtime);
   const summaryNode = async (state: RequirementState): Promise<Partial<RequirementState>> => {
     const startedAt = Date.now();
     log.debug({}, 'summary_subgraph_start');
@@ -601,13 +605,13 @@ function buildNodes(model: ChatOpenAI) {
 
   const humanRefineNode = async (state: RequirementState): Promise<Partial<RequirementState>> => {
     const response = await invokeWithRetry(
-      () => model.invoke([
+      () => tracked(state, 'humanRefineStep', 'summary_agent', () => model.invoke([
         new SystemMessage(REFINE_SYSTEM),
         new HumanMessage(
           `原报告：\n\n${state.summary}\n\n人工评审意见：\n\n${state.critique}\n\n` +
           '请根据人工评审意见修订报告，只改有问题的地方，并返回修订后的完整报告。',
         ),
-      ]),
+      ])),
       'human_refine',
     );
     const summary = typeof response.content === 'string'
@@ -625,7 +629,7 @@ function buildNodes(model: ChatOpenAI) {
     const input = String(state.messages.at(-1)?.content ?? '');
     try {
       const result = await invokeWithRetry(
-        () => model.invoke([
+        () => tracked(state, 'queryHandler', 'functional', () => model.invoke([
           new SystemMessage(
             '你是需求查询助手。根据用户提供的需求编号或查询条件，简洁地回答关于需求状态、' +
             '进度、负责人等信息的问题。如果用户输入中包含"[系统内部数据]"标记的实际需求报告内容，' +
@@ -633,7 +637,7 @@ function buildNodes(model: ChatOpenAI) {
             '需求的记录，不要虚构结果。',
           ),
           new HumanMessage(input),
-        ]),
+        ])),
         'query_handler',
       );
       const content = typeof result.content === 'string'
@@ -651,10 +655,10 @@ function buildNodes(model: ChatOpenAI) {
     const input = String(state.messages.at(-1)?.content ?? '');
     try {
       const result = await invokeWithRetry(
-        () => model.invoke([
+        () => tracked(state, 'chatHandler', 'functional', () => model.invoke([
           new SystemMessage('你是友好的AI助手，负责处理与需求管理系统无关的日常对话。请给出简洁、自然的回复。'),
           new HumanMessage(input),
-        ]),
+        ])),
         'chat_handler',
       );
       const content = typeof result.content === 'string'
@@ -682,12 +686,16 @@ function routeAfterHumanReview(state: RequirementState): string {
 
 // ─── Graph factory ────────────────────────────────────────────────────────────
 
-export function createAnalysisGraph(model: ChatOpenAI, checkpointer?: BaseCheckpointSaver) {
+export function createAnalysisGraph(
+  model: ChatOpenAI,
+  checkpointer?: BaseCheckpointSaver,
+  runtime?: RuntimeCostPolicy,
+) {
   const {
     classifierNode, extractNode, clarifyNode, clarificationReviewNode,
     analysisNode, riskNode, summaryNode,
     humanReviewNode, humanRefineNode, queryHandlerNode, chatHandlerNode,
-  } = buildNodes(model);
+  } = buildNodes(model, runtime);
 
   return new StateGraph(RequirementAnalysisState)
     .addNode('classifier',   classifierNode)

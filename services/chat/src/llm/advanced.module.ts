@@ -22,6 +22,7 @@ import { LLM_CONFIG } from './llm.constants.js';
 import { ConversationService } from '../conversation/conversation.service.js';
 import { PipelineDemoController } from './pipeline-demo/pipeline-demo.controller.js';
 import { PipelineDemoService } from './pipeline-demo/pipeline-demo.service.js';
+import { TokenUsageController } from './cost/token-usage.controller.js';
 
 @Module({
   imports: [AuthModule, MessageModule, DocumentModule],
@@ -33,6 +34,7 @@ import { PipelineDemoService } from './pipeline-demo/pipeline-demo.service.js';
     AdvancedController,
     UIChatController,
     PipelineDemoController,
+    TokenUsageController,
   ],
   providers: [
     { provide: LLM_CONFIG, useValue: loadLangchainConfig() },

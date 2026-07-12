@@ -32,6 +32,8 @@ import { createLogger } from '../../observability/logger.js';
 import { nodeTracer } from '../../observability/node-tracer.js';
 import type { ExpertTiming, NodeTrace } from '../../observability/node-tracer.js';
 import { CostTrackingService } from '../cost/cost-tracking.service.js';
+import { TokenUsageService } from '../cost/token-usage.service.js';
+import { PrismaService } from '../../prisma/prisma.service.js';
 
 const log = createLogger('orchestrator');
 
@@ -231,6 +233,7 @@ export class OrchestratorService {
     @Inject(LLM_CONFIG) config: LlmConfig,
     private readonly requirementReportService: RequirementReportService,
     private readonly costTrackingService: CostTrackingService,
+    prisma: PrismaService,
   ) {
     this.model = createChatModel(config);
     this.modelName = config.llm.modelName;
@@ -238,8 +241,15 @@ export class OrchestratorService {
     // interrupt raised by one request can be resumed by the user's next click.
     // Postgres keeps pending reviews durable across restarts; local development
     // transparently falls back to MemorySaver when DATABASE_URL is unavailable.
+    const tokenUsageService = new TokenUsageService(prisma);
+    const monthlyBudgetUsd = Number(process.env.MONTHLY_LLM_BUDGET_USD ?? 10);
     this.analysisGraphPromise = createPostgresSaver()
-      .then((checkpointer) => createAnalysisGraph(this.model, checkpointer));
+      .then((checkpointer) => createAnalysisGraph(this.model, checkpointer, {
+        usageService: tokenUsageService,
+        monthlyBudgetUsd: Number.isFinite(monthlyBudgetUsd) && monthlyBudgetUsd > 0 ? monthlyBudgetUsd : 10,
+        modelName: config.llm.modelName,
+        graphName: 'requirement-analysis',
+      }));
   }
 
   private async recordEstimatedNodeCost(

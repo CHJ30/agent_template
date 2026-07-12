@@ -13,6 +13,10 @@ import {
   compressConversation,
   type SummaryModel,
 } from '../src/llm/context/conversation-compressor.js';
+import type { PrismaClient } from '@prisma/client';
+import { TokenUsageService } from '../src/llm/cost/token-usage.service.js';
+import { withTokenUsage } from '../src/llm/cost/with-token-usage.js';
+import { resolveBudgetAction } from '../src/llm/cost/budget-policy.js';
 
 function toolCallingAi(ids: string[]): AIMessage {
   return new AIMessage({
@@ -113,5 +117,128 @@ describe('10.5.2 conversation-compressor', () => {
       new HumanMessage('3'),
     ], model, { keepRecent: 1 });
     expect(result.slice(0, 2)).toEqual([systemA, systemB]);
+  });
+});
+
+describe('10.8.2 TokenUsageService', () => {
+  it('recordUsage 写入完整字段并补全 totalTokens', async () => {
+    const create = mock(async () => ({}));
+    const service = new TokenUsageService({ token_usages: { create } } as unknown as PrismaClient);
+    await service.recordUsage({
+      graphName: 'requirement-analysis', nodeName: 'summary', agentName: 'summaryAgent',
+      modelName: 'gpt-4o-mini', inputTokens: 100, outputTokens: 20,
+      cachedInputTokens: 10, estimatedCostUsd: 0.001, latencyMs: 50,
+    });
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(create.mock.calls[0][0].data).toMatchObject({
+      graphName: 'requirement-analysis', totalTokens: 120, provider: 'openai', isEstimated: false,
+    });
+  });
+
+  it('按当月聚合总成本和 tokens', async () => {
+    const aggregate = mock(async () => ({
+      _sum: { estimatedCostUsd: 2.5, inputTokens: 1000, outputTokens: 200, cachedInputTokens: 100 },
+      _count: { _all: 4 },
+    }));
+    const service = new TokenUsageService({ token_usages: { aggregate } } as unknown as PrismaClient);
+    expect(await service.getMonthlyStats()).toEqual({
+      totalCost: 2.5, totalInputTokens: 1000, totalOutputTokens: 200, totalCachedTokens: 100, calls: 4,
+    });
+  });
+
+  it('按 nodeName 和 agentName 聚合并保持成本降序结果', async () => {
+    const groupBy = mock(async (args: { by: string[] }) => args.by[0] === 'nodeName'
+      ? [{ nodeName: 'summary', _sum: { estimatedCostUsd: 3 }, _count: { _all: 2 } }]
+      : [{ agentName: 'security', _sum: { estimatedCostUsd: 2 }, _count: { _all: 1 } }]);
+    const service = new TokenUsageService({ token_usages: { groupBy } } as unknown as PrismaClient);
+    expect(await service.getStatsByNode()).toEqual([{ nodeName: 'summary', totalCost: 3, calls: 2 }]);
+    expect(await service.getStatsByAgent()).toEqual([{ agentName: 'security', totalCost: 2, calls: 1 }]);
+    expect(groupBy.mock.calls[0][0].orderBy).toEqual({ _sum: { estimatedCostUsd: 'desc' } });
+  });
+
+  it('isOverBudget 判断月度预算', async () => {
+    const aggregate = mock(async () => ({
+      _sum: { estimatedCostUsd: 10, inputTokens: 0, outputTokens: 0, cachedInputTokens: 0 },
+      _count: { _all: 1 },
+    }));
+    const service = new TokenUsageService({ token_usages: { aggregate } } as unknown as PrismaClient);
+    expect(await service.isOverBudget(9)).toBe(true);
+    expect(await service.isOverBudget(11)).toBe(false);
+  });
+
+  it('Prisma 写入异常时不向上抛出', async () => {
+    const create = mock(async () => { throw new Error('db down'); });
+    const service = new TokenUsageService({ token_usages: { create } } as unknown as PrismaClient);
+    await expect(service.recordUsage({
+      graphName: 'g', nodeName: 'n', agentName: 'a', modelName: 'gpt-4o-mini',
+    })).resolves.toBeUndefined();
+  });
+});
+
+describe('10.8.3 withTokenUsage', () => {
+  const options = {
+    graphName: 'requirement-analysis', nodeName: 'riskStep', agentName: 'riskAgent', modelName: 'gpt-4o-mini',
+  };
+
+  it('有 provider usage 时精确记录并应用 cached token', async () => {
+    const recordUsage = mock(async () => {});
+    const response = {
+      content: '完成',
+      response_metadata: { usage: {
+        prompt_tokens: 100, completion_tokens: 20, total_tokens: 120,
+        prompt_tokens_details: { cached_tokens: 30 },
+      } },
+    };
+    expect(await withTokenUsage(options, { recordUsage } as unknown as TokenUsageService, async () => response)).toBe(response);
+    expect(recordUsage.mock.calls[0][0]).toMatchObject({
+      inputTokens: 100, outputTokens: 20, cachedInputTokens: 30, totalTokens: 120, isEstimated: false,
+    });
+  });
+
+  it('没有 metadata 时使用 input = output × 5 估算', async () => {
+    const recordUsage = mock(async () => {});
+    const response = { content: '中文输出' };
+    await withTokenUsage(options, { recordUsage } as unknown as TokenUsageService, async () => response);
+    const saved = recordUsage.mock.calls[0][0];
+    expect(saved.inputTokens).toBe(saved.outputTokens * 5);
+    expect(saved.isEstimated).toBe(true);
+  });
+
+  it('recordUsage 抛错时仍返回模型响应', async () => {
+    const response = { content: '仍然返回' };
+    const service = { recordUsage: mock(async () => { throw new Error('write failed'); }) } as unknown as TokenUsageService;
+    expect(await withTokenUsage(options, service, async () => response)).toBe(response);
+  });
+
+  it('usageService 为 null 时跳过记录并返回响应', async () => {
+    const response = { content: '无需记录' };
+    expect(await withTokenUsage(options, null, async () => response)).toBe(response);
+  });
+});
+
+describe('10.9.3 预算动作选择 - resolveBudgetAction', () => {
+  it('50% 预算允许执行', () => {
+    expect(resolveBudgetAction({ budgetUsedPercent: 50, agentName: 'functional' }).action).toBe('allow');
+  });
+
+  it('85% 预算下 functional 自动降级', () => {
+    const result = resolveBudgetAction({ budgetUsedPercent: 85, agentName: 'functional' });
+    expect(result.action).toBe('downgrade');
+    expect(result.reason).toContain('85');
+  });
+
+  it('90% 预算下 security_expert 高风险豁免降级', () => {
+    expect(resolveBudgetAction({ budgetUsedPercent: 90, agentName: 'security_expert' }).action).toBe('allow');
+  });
+
+  it('110% 预算下 risk_agent 被拒绝', () => {
+    expect(resolveBudgetAction({ budgetUsedPercent: 110, agentName: 'risk_agent' }).action).toBe('reject');
+  });
+
+  it('110% 预算下 compressor 始终允许', () => {
+    expect(resolveBudgetAction({ budgetUsedPercent: 110, agentName: 'compressor' })).toEqual({
+      action: 'allow',
+      reason: 'compressor allowed even over budget (cost reduction purpose)',
+    });
   });
 });
