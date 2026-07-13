@@ -23,6 +23,9 @@ import { ConversationService } from '../conversation/conversation.service.js';
 import { PipelineDemoController } from './pipeline-demo/pipeline-demo.controller.js';
 import { PipelineDemoService } from './pipeline-demo/pipeline-demo.service.js';
 import { TokenUsageController } from './cost/token-usage.controller.js';
+import { RagDemoController } from '../../rag/demo/rag-demo.controller.js';
+import { RagDemoService } from '../../rag/demo/rag-demo.service.js';
+import { LegalKnowledgeIngestionService } from '../../rag/ingestion/legal-knowledge-ingestion.service.js';
 
 @Module({
   imports: [AuthModule, MessageModule, DocumentModule],
@@ -35,6 +38,7 @@ import { TokenUsageController } from './cost/token-usage.controller.js';
     UIChatController,
     PipelineDemoController,
     TokenUsageController,
+    RagDemoController,
   ],
   providers: [
     { provide: LLM_CONFIG, useValue: loadLangchainConfig() },
@@ -49,6 +53,8 @@ import { TokenUsageController } from './cost/token-usage.controller.js';
     UIResponseService,
     UIFlowService,
     PipelineDemoService,
+    RagDemoService,
+    LegalKnowledgeIngestionService,
   ],
   exports: [AdvancedAnalysisService],
 })

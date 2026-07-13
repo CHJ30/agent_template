@@ -6,7 +6,7 @@ import { USERS, USER_KEYS, type UserKey } from "../lib/demoUsers";
 interface Props {
   userKey: UserKey;
   onUserKeyChange: (key: UserKey) => void;
-  active?: "chat" | "documents" | "pipeline";
+  active?: "chat" | "documents" | "pipeline" | "rag";
   documentCount?: number;
 }
 
@@ -44,6 +44,16 @@ export function AppHeader({ userKey, onUserKeyChange, active = "chat", documentC
             ].join(" ")}
           >
             联合流水线
+            <span className="rounded bg-rose-100 px-1 py-0.5 text-[8px] font-bold leading-none text-rose-700">TEST</span>
+          </Link>
+          <Link
+            href="/rag-demo"
+            className={[
+              "flex items-center gap-1.5 rounded-md px-3 py-1.5 font-medium transition-colors",
+              active === "rag" ? "bg-white text-blue-700 shadow-sm" : "text-gray-600 hover:text-gray-900",
+            ].join(" ")}
+          >
+            RAG as Tool
             <span className="rounded bg-rose-100 px-1 py-0.5 text-[8px] font-bold leading-none text-rose-700">TEST</span>
           </Link>
           <Link

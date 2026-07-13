@@ -5,7 +5,7 @@
 	"scripts": {
 		"dev": "prisma generate && NODE_ENV=development nest start --watch",
 		"build": "prisma generate && rm -rf dist tsconfig.tsbuildinfo && nest build",
-		"start": "NODE_ENV=production bun run dist/main.js",
+		"start": "NODE_ENV=production bun run dist/src/main.js",
 		"typecheck": "tsc --noEmit",
 		"lint": "tsc --noEmit",
 		"db:generate": "prisma generate",

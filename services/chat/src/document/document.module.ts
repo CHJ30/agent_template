@@ -12,6 +12,6 @@ import { SearchController } from './search.controller.js';
   imports: [AuthModule, SseModule],
   controllers: [DocumentController, SearchController],
   providers: [DocumentService, LocalEmbeddingService, ChunkService, SearchService],
-  exports: [DocumentService, ChunkService, SearchService],
+  exports: [DocumentService, LocalEmbeddingService, ChunkService, SearchService],
 })
 export class DocumentModule {}

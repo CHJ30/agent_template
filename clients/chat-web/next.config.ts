@@ -12,6 +12,7 @@ const nextConfig: NextConfig = {
       { source: "/api/embedding/:path*", destination: "http://localhost:8081/api/embedding/:path*" },
       { source: "/api/agents/:path*",    destination: "http://localhost:8081/api/agents/:path*"    },
       { source: "/api/pipeline-demo/:path*", destination: "http://localhost:8081/api/pipeline-demo/:path*" },
+      { source: "/api/rag-demo/:path*", destination: "http://localhost:8081/api/rag-demo/:path*" },
       { source: "/api/advanced/:path*",        destination: "http://localhost:8081/api/advanced/:path*"        },
       { source: "/api/ui-chat/:path*",        destination: "http://localhost:8081/api/ui-chat/:path*"        },
       { source: "/api/conversations/:path*", destination: "http://localhost:8081/api/conversations/:path*" },

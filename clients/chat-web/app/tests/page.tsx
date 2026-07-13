@@ -35,6 +35,12 @@ const TEST_PAGES = [
     description: "规划执行、多专家调度与反思重试的联合分析流水线。",
   },
   {
+    id: "rag-tool",
+    label: "RAG as Tool",
+    href: "/rag-demo",
+    description: "民法典、刑法典法律知识库问答与 Citation、预算策略测试。",
+  },
+  {
     id: "token-usage",
     label: "Token 用量统计",
     href: "/token-usage",
