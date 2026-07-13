@@ -8,6 +8,7 @@ import { InfoCard } from "./InfoCard";
 import { StepsProgress } from "./StepsProgress";
 import { DataTable } from "./DataTable";
 import { ActionButtons } from "./ActionButtons";
+import { DocumentResults } from "./DocumentResults";
 
 interface Props {
   component: RenderableUIComponent;
@@ -69,6 +70,9 @@ export function ComponentRenderer({ component, onAction, disabled = false }: Pro
 
     case "action_buttons":
       return <ActionButtons component={knownComponent} onAction={onAction} disabled={disabled} />;
+
+    case "document_results":
+      return <DocumentResults component={knownComponent} />;
 
     default:
       return <TextDisplay content={componentToFallbackText(component).content} format="plain" />;

@@ -31,15 +31,29 @@ interface AssistantEntry {
 }
 
 type ChatEntry = UserEntry | AssistantEntry;
+export type { ChatEntry, UserEntry, AssistantEntry };
 
 interface Props {
   token: string;
   title?: string;
   sessionId?: string;
+  // Pre-existing messages to hydrate the chat with (e.g. when switching to a
+  // previously saved conversation). Only read once, on mount.
+  initialEntries?: ChatEntry[];
+  // Fired once per completed exchange (after the SSE stream's 'done' event)
+  // with the user's text and the assistant's full markdown reply, so the
+  // parent page can persist it (e.g. POST /api/conversations/:id/messages).
+  onExchange?: (
+    userText: string,
+    assistantText: string,
+    metadata?: Record<string, unknown>,
+  ) => void | Promise<void>;
+  onResolveInteraction?: (componentId: string) => void | Promise<void>;
+  onStartInteraction?: (componentId: string, userText: string) => void | Promise<void>;
 }
 
 // Quick-input shortcuts shown above the text box — clicking one sends it immediately.
-const QUICK_PROMPTS = ['我需要一个todo需求', '今天天气怎么样，300字小作文', '查询需求REQ-20260708-247'];
+const QUICK_PROMPTS = ['我要找蔡鸿键的简历', '我需要一个todo需求', '今天天气怎么样，300字小作文', '查询需求REQ-20260708-247'];
 
 // ─── API helpers ──────────────────────────────────────────────────────────────
 
@@ -62,17 +76,71 @@ async function postAction(
   return normalizeAIUIResponse(await res.json());
 }
 
+async function searchFiles(token: string, query: string): Promise<AIUIResponse> {
+  const res = await fetch(`${BASE}/api/search/ui`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({ query, topK: 8 }),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return normalizeAIUIResponse(await res.json());
+}
+
+function extractFileSearchQuery(text: string): string | null {
+  const normalized = text.trim();
+  const patterns = [
+    /^在文件(?:中|里)?(?:查找|搜索|找)\s*[:：]?\s*(.+)$/u,
+    /^我要找\s*[:：]?\s*(.+)$/u,
+  ];
+  for (const pattern of patterns) {
+    const match = normalized.match(pattern);
+    const query = match?.[1]?.trim();
+    if (query) return query;
+  }
+  return null;
+}
+
+function buildPendingHitlMetadata(
+  component: Record<string, unknown> | null,
+  agentSteps: AgentStepInfo[] = [],
+  progress = 0,
+) {
+  if (!component || (component.type !== "form" && component.type !== "confirmation")) return undefined;
+  return {
+    status: "pending_hitl",
+    componentId: typeof component.id === "string" ? component.id : "",
+    interruptKind: component.interruptKind,
+    resumeToken: component.resumeToken,
+    component,
+    agentSteps,
+    progress,
+  };
+}
+
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export function AIChatContainer({ token, title = "需求分析助手", sessionId: propSessionId }: Props) {
+export function AIChatContainer({
+  token,
+  title = "需求分析助手",
+  sessionId: propSessionId,
+  initialEntries,
+  onExchange,
+  onResolveInteraction,
+  onStartInteraction,
+}: Props) {
   const router = useRouter();
   // Use the shared sessionId from the parent page if provided; otherwise generate one.
   const [localSessionId, setLocalSessionId] = useState<string>('');
   useEffect(() => { if (!propSessionId) setLocalSessionId(crypto.randomUUID()); }, [propSessionId]);
   const sessionId = propSessionId || localSessionId;
-  const [entries, setEntries] = useState<ChatEntry[]>([]);
+  const [entries, setEntries] = useState<ChatEntry[]>(() => initialEntries ?? []);
   const [input, setInput] = useState("");
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(() =>
+    initialEntries?.some((entry) => entry.role === "assistant" && entry.streaming) ?? false,
+  );
   const [error, setError] = useState<string | null>(null);
   const [lastReportId, setLastReportId] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -81,6 +149,14 @@ export function AIChatContainer({ token, title = "需求分析助手", sessionId
     (acc, e, i) => (e.role === "assistant" ? i : acc),
     -1,
   );
+
+  useEffect(() => {
+    if (!initialEntries) return;
+    setEntries(initialEntries);
+    setLoading(initialEntries.some(
+      (entry) => entry.role === "assistant" && entry.streaming,
+    ));
+  }, [initialEntries]);
 
   // Scroll to bottom whenever entries change
   useEffect(() => {
@@ -164,7 +240,7 @@ export function AIChatContainer({ token, title = "需求分析助手", sessionId
           ...e,
           streaming: false,
           intent: ev.intent ?? e.intent,
-          progress: 100,
+          progress: ev.status === "awaiting_review" ? e.progress : 100,
         }));
         if (ev.reportId) setLastReportId(ev.reportId);
         return;
@@ -190,6 +266,37 @@ export function AIChatContainer({ token, title = "需求分析助手", sessionId
     // answers) to the backend, while `text` is what's shown in the user's chat
     // bubble — they can differ (see the clarify-form submit handler below).
     const sendText = options?.sendText ?? text;
+    const fileSearchQuery = !options?.skipClarification ? extractFileSearchQuery(sendText) : null;
+
+    if (fileSearchQuery) {
+      const assistantId = crypto.randomUUID();
+      addEntry({
+        id: assistantId,
+        role: "assistant",
+        components: [],
+        intent: "document_search",
+        progress: 0,
+        streaming: true,
+      });
+      setLoading(true);
+      try {
+        const res = await searchFiles(token, fileSearchQuery);
+        updateAssistant(assistantId, (entry) => ({
+          ...entry,
+          components: res.components,
+          intent: res.intent ?? "document_search",
+          progress: 100,
+          streaming: false,
+        }));
+        await onExchange?.(text, `已在文件库中查找：${fileSearchQuery}`);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+        updateAssistant(assistantId, (entry) => ({ ...entry, streaming: false }));
+      } finally {
+        setLoading(false);
+      }
+      return;
+    }
 
     const assistantId = crypto.randomUUID();
     const mdId = `md-${assistantId}`;
@@ -204,13 +311,34 @@ export function AIChatContainer({ token, title = "需求分析助手", sessionId
 
     setLoading(true);
     try {
+      let finalContent = "";
+      let pendingComponent: Record<string, unknown> | null = null;
+      let persistedProgress = 0;
+      const persistedSteps: AgentStepInfo[] = [];
       for await (const ev of streamOrchestrate(`${BASE}/api/agents/orchestrate-stream`, {
         input: sendText,
         sessionId,
         skipClarification: options?.skipClarification ?? false,
       })) {
         applyStreamEvent(assistantId, mdId, ev);
+        if (ev.messageType === "progress" && typeof ev.progress === "number") persistedProgress = ev.progress;
+        if ((ev.messageType === "agent_start" || ev.messageType === "agent_end") && ev.agent) {
+          const existing = persistedSteps.find((step) => step.agent === ev.agent);
+          const status = ev.messageType === "agent_end" ? "done" as const : "active" as const;
+          if (existing) existing.status = status;
+          else persistedSteps.push({ agent: ev.agent, label: ev.label ?? ev.agent, status });
+        }
+        if (ev.messageType === "ui" && ev.component &&
+          (ev.component.type === "form" || ev.component.type === "confirmation")) {
+          pendingComponent = ev.component;
+        }
+        if (ev.messageType === "done" && ev.content) finalContent = ev.content;
       }
+      if (finalContent) await onExchange?.(
+        text,
+        finalContent,
+        buildPendingHitlMetadata(pendingComponent, persistedSteps, persistedProgress),
+      );
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       updateAssistant(assistantId, (entry) => ({ ...entry, streaming: false }));
@@ -228,10 +356,67 @@ export function AIChatContainer({ token, title = "需求分析助手", sessionId
       return;
     }
 
-    // Clarify form: assemble Q&A, prepend the original requirement text (so
-    // the backend keeps full context instead of reclassifying the bare Q&A
-    // answers as a brand-new, unrelated message — e.g. mistaking it for chat),
-    // and re-run orchestration via streaming with clarification skipped.
+    // Summary HITL confirmation: resume the exact paused LangGraph thread.
+    // The textarea is optional; an empty confirmation (or cancel) lets the
+    // current report pass without running the human-refine node.
+    if (action.actionType === "confirmation" && action.componentId.startsWith("hitl-summary-")) {
+      if (loading) return;
+      const confirmed = action.payload["confirmed"] === true;
+      const comment = typeof action.payload["comment"] === "string"
+        ? action.payload["comment"].trim()
+        : "";
+      const resumeToken = typeof action.payload["resumeToken"] === "string"
+        ? action.payload["resumeToken"]
+        : "";
+      if (!resumeToken) {
+        setError("人工评审恢复标识缺失，请重新发起分析");
+        return;
+      }
+
+      const userText = confirmed && comment
+        ? `人工评审意见：${comment}`
+        : "不添加人工评审意见，当前报告直接通过";
+      addEntry({ id: crypto.randomUUID(), role: "user", text: userText });
+
+      const assistantId = crypto.randomUUID();
+      const mdId = `md-${assistantId}`;
+      addEntry({
+        id: assistantId,
+        role: "assistant",
+        components: [],
+        intent: "analyze",
+        progress: 90,
+        agentSteps: [],
+        streaming: true,
+      });
+
+      setError(null);
+      setLoading(true);
+      try {
+        let finalContent = "";
+        for await (const ev of streamOrchestrate(`${BASE}/api/agents/orchestrate-resume-stream`, {
+          threadId: resumeToken,
+          confirmed,
+          critique: comment,
+        })) {
+          applyStreamEvent(assistantId, mdId, ev);
+          if (ev.messageType === "done" && ev.content) finalContent = ev.content;
+        }
+        if (finalContent) {
+          await onResolveInteraction?.(action.componentId);
+          await onExchange?.(userText, finalContent);
+        }
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+        updateAssistant(assistantId, (entry) => ({ ...entry, streaming: false }));
+      } finally {
+        setLoading(false);
+      }
+      return;
+    }
+
+    // Clarification HITL: resume the exact persisted LangGraph thread instead
+    // of starting a second analysis request.
     if (action.actionType === "form_submit" && action.componentId.startsWith("form-clarify-")) {
       const assistantIdx = entries.findIndex(
         (e) => e.role === "assistant" && e.components.some((c) => c.id === action.componentId),
@@ -241,24 +426,60 @@ export function AIChatContainer({ token, title = "需求分析助手", sessionId
           ? (entries[assistantIdx] as AssistantEntry).components.find((c) => c.id === action.componentId)
           : undefined;
       const payload = action.payload as Record<string, string>;
+      const resumeToken = payload.resumeToken ?? "";
+      if (!resumeToken) {
+        setError("澄清流程恢复标识缺失，请重新发起分析");
+        return;
+      }
+      const answers = Object.fromEntries(
+        Object.entries(payload).filter(([key]) => key !== "resumeToken"),
+      );
       const answerText =
         component && component.type === "form"
           ? component.fields
-              .map((f) => `${f.label}\n${payload[f.name] ?? ""}`)
+              .map((f) => `${f.label}\n${answers[f.name] ?? ""}`)
               .join("\n\n")
-          : Object.values(payload).filter(Boolean).join("\n");
+          : Object.values(answers).filter(Boolean).join("\n");
 
-      let originalText = "";
-      for (let i = assistantIdx - 1; i >= 0; i--) {
-        const e = entries[i];
-        if (e.role === "user") {
-          originalText = e.text;
-          break;
+      addEntry({ id: crypto.randomUUID(), role: "user", text: answerText || "未补充，继续分析" });
+      const assistantId = crypto.randomUUID();
+      const mdId = `md-${assistantId}`;
+      addEntry({
+        id: assistantId,
+        role: "assistant",
+        components: [],
+        intent: "analyze",
+        progress: 45,
+        agentSteps: [],
+        streaming: true,
+      });
+      setError(null);
+      setLoading(true);
+      try {
+        const submittedText = answerText || "未补充，继续分析";
+        await onStartInteraction?.(action.componentId, submittedText);
+        let finalContent = "";
+        let pendingComponent: Record<string, unknown> | null = null;
+        for await (const ev of streamOrchestrate(
+          `${BASE}/api/agents/orchestrate-clarification-resume-stream`,
+          { threadId: resumeToken, answers, conversationId: sessionId, componentId: action.componentId },
+        )) {
+          applyStreamEvent(assistantId, mdId, ev);
+          if (ev.messageType === "ui" && ev.component &&
+            (ev.component.type === "form" || ev.component.type === "confirmation")) {
+            pendingComponent = ev.component;
+          }
+          if (ev.messageType === "done" && ev.content) finalContent = ev.content;
         }
+        // The backend persists both the running state and the resulting next
+        // interrupt/final content, so recovery does not depend on this SSE
+        // connection surviving until completion.
+      } catch (cause) {
+        setError(cause instanceof Error ? cause.message : String(cause));
+        updateAssistant(assistantId, (entry) => ({ ...entry, streaming: false }));
+      } finally {
+        setLoading(false);
       }
-      const sendText = originalText ? `${originalText}\n\n补充信息：\n${answerText}` : answerText;
-
-      await handleSend(answerText, { sendText, skipClarification: true });
       return;
     }
 
@@ -412,7 +633,7 @@ export function AIChatContainer({ token, title = "需求分析助手", sessionId
             placeholder="输入需求描述，Enter 发送，Shift+Enter 换行…"
             rows={2}
             disabled={loading}
-            className="flex-1 resize-none rounded-xl border border-gray-300 px-3 py-2 text-sm text-gray-800 placeholder-gray-400 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:opacity-60"
+            className="h-20 flex-1 resize-none overflow-y-auto rounded-xl border border-gray-300 px-3 py-2 text-sm text-gray-800 placeholder-gray-400 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:opacity-60"
           />
           <button
             onClick={() => void handleSend()}

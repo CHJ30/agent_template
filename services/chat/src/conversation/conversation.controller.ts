@@ -12,6 +12,7 @@ import { CurrentUser } from '../auth/current-user.decorator.js';
 import { ConversationService } from './conversation.service.js';
 import { MessageService } from '../message/message.service.js';
 import { AdvancedAnalysisService } from '../llm/advanced-analysis.service.js';
+import { MessageRole } from '@prisma/client';
 
 @Controller('api/conversations')
 @UseGuards(JwtAuthGuard)
@@ -43,6 +44,46 @@ export class ConversationController {
     return this.conversationService
       .findById(id, user.userId)
       .then(() => this.messageService.getHistory(id));
+  }
+
+  // Appends a message record without invoking any LLM — used by pages that
+  // generate replies through a different pipeline (e.g. the orchestrator SSE
+  // stream on the main page) but still want the exchange persisted here so
+  // it shows up in the conversation's history / sidebar.
+  @Post(':id/messages')
+  async appendMessage(
+    @CurrentUser() user: { userId: string },
+    @Param('id') id: string,
+    @Body() body: { role: 'user' | 'assistant'; content: string; metadata?: Record<string, unknown> },
+  ) {
+    await this.conversationService.findById(id, user.userId);
+    const role = body.role === 'user' ? MessageRole.USER : MessageRole.ASSISTANT;
+    return this.messageService.addMessage(id, role, body.content, body.metadata);
+  }
+
+  @Post(':id/interactions/:componentId/resolve')
+  async resolveInteraction(
+    @CurrentUser() user: { userId: string },
+    @Param('id') id: string,
+    @Param('componentId') componentId: string,
+  ) {
+    await this.conversationService.findById(id, user.userId);
+    return { resolved: await this.messageService.resolveInteraction(id, componentId) };
+  }
+
+  @Post(':id/interactions/:componentId/start')
+  async startInteraction(
+    @CurrentUser() user: { userId: string },
+    @Param('id') id: string,
+    @Param('componentId') componentId: string,
+    @Body() body: { userText?: string },
+  ) {
+    await this.conversationService.findById(id, user.userId);
+    const started = await this.messageService.startInteraction(id, componentId);
+    if (started && body.userText) {
+      await this.messageService.addMessage(id, MessageRole.USER, body.userText);
+    }
+    return { started };
   }
 
   @Post(':id/chat')

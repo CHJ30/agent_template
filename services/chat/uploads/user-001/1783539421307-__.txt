@@ -1,0 +1,114 @@
+先帮你把这个作业完整翻译一遍（不丢信息版），然后下一步我再帮你拆“怎么做才拿高分”。
+
+📘 2026.1 CambioML 前端工程师编码挑战：AI Agent Dashboard（翻译版）
+⚠️ 保密声明
+本文件包含公司机密信息。访问即表示你同意 NDA 条款。禁止未经授权的使用、泄露或传播，否则可能承担法律责任。如误收，请立即通知发送者并删除。
+
+🎯 任务目标
+通过本编码挑战，你将学习并展示：
+👉 如何构建类似 OpenAI Operator 的生产级 AI Agent 前端系统
+
+⏰ 时间要求
+截止时间：24 小时 
+实际建议投入：2–4 小时 
+允许使用 AI 编程工具（Claude Code / Gemini CLI / Codex 等） 
+
+🧩 任务要求
+1️⃣ 基于现有 computer use 项目扩展
+起点项目：
+👉 https://github.com/vercel-labs/ai-sdk-computer-use
+你需要在这个 demo 基础上升级成一个“生产级 AI Agent Dashboard”。
+
+2️⃣ 构建一个双栏 Dashboard UI
+必须实现左右两栏布局：
+左侧（Chat 区域）
+AI 聊天窗口 
+tool call（工具调用）需要内联展示 
+一个可折叠的 debug 面板 
+右侧（执行区）
+VNC viewer（远程桌面画面） 
+tool call 详细信息展示区 
+额外要求：
+左右面板可以水平拖拽调整宽度 
+
+3️⃣ 事件流（Event Pipeline）+ 类型状态管理
+你需要设计一个“事件系统”，包含：
+必须记录：
+每一次 tool call：
+id 
+timestamp（时间） 
+type（工具类型） 
+payload（参数） 
+status（状态） 
+duration（耗时） 
+
+派生状态（Derived State）：
+各类型 tool call 的统计数量 
+agent 当前状态（idle / running / error 等） 
+
+Debug 面板：
+可视化整个 event store 
+用来调试 agent 行为流 
+
+4️⃣ 多会话 Chat History
+必须支持：
+创建 session 
+切换 session 
+删除 session 
+chat history 本地持久化（localStorage） 
+
+5️⃣ TypeScript 强约束
+必须遵守：
+❌ 禁止 any 
+✅ 使用 discriminated unions（可辨别联合类型） 
+类型系统要清晰、可扩展 
+
+6️⃣ 性能要求（重点）
+👉 VNC viewer 不能因为 chat 更新而重新渲染
+（说明你要做 memo / state isolation / selector 优化）
+
+⭐ Bonus
+移动端适配（responsive layout） 
+
+📦 交付物
+1️⃣ GitHub 仓库（私有）
+README 必须包含：
+第一行必须是：
+Author: [你的全名]
+并邀请协作者：
+lingjiekong 
+ghamry03 
+goldmermaid 
+EnergentAI 
+
+2️⃣ 部署地址
+例如：
+Vercel 
+Netlify 
+
+3️⃣ 5分钟 demo 视频（必须带声音）
+内容必须包括：
+1.UI 结构展示（双栏 + 可拖拽） 
+2.debug panel 展示 
+3.实际 demo： 
+o输入：“What's the weather in Dubai?” 
+o展示 agent 执行过程 
+4.chat session： 
+o创建 / 切换 / 删除 session 
+5.简单讲代码结构和关键设计 
+
+📊 评分标准
+架构设计（40%） 
+集成能力 & 问题解决（30%） 
+代码质量（20%） 
+文档（10%） 
+
+🔑 API Key
+Claude API：
+全球：
+https://platform.claude.com/settings/keys 
+中国：
+https://www.packyapi.com/console/token 
+
+📌 Appendix
+（略）

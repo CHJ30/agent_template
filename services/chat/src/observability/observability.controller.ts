@@ -1,9 +1,11 @@
 import { Controller, Get, Query } from '@nestjs/common';
 import { register } from 'prom-client';
 import { nodeTracer } from './node-tracer.js';
+import { CostTrackingService } from '../llm/cost/cost-tracking.service.js';
 
 @Controller('observability')
 export class ObservabilityController {
+  constructor(private readonly costTrackingService: CostTrackingService) {}
   @Get('metrics')
   async getMetrics() {
     return register.getMetricsAsJSON();
@@ -11,9 +13,10 @@ export class ObservabilityController {
 
   /** Per-session node lifecycle traces for the observability drawer. */
   @Get('session')
-  getSession(@Query('sessionId') sessionId: string) {
+  async getSession(@Query('sessionId') sessionId: string) {
     const requests = nodeTracer.getSession(sessionId ?? '');
     const last     = nodeTracer.getLastRequest(sessionId ?? '');
-    return { sessionId, requests, last };
+    const costs = await this.costTrackingService.getSessionCosts(sessionId ?? '');
+    return { sessionId, requests, last, costs };
   }
 }

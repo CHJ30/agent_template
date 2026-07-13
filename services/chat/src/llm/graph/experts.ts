@@ -22,6 +22,7 @@ import {
   checkSecurityPolicyTool,
 } from '../tools/analysis-tools.js';
 import { createLogger } from '../../observability/logger.js';
+import { runWithRuntimeCostPolicy, type RuntimeCostPolicy } from '../cost/runtime-cost-policy.js';
 
 const log = createLogger('experts');
 
@@ -43,6 +44,7 @@ const ExpertSubState = Annotation.Root({
   expertLoopCount: Annotation<number>({ reducer: (_, b) => b,         default: () => 0   }),
   // Accumulates every tool name called during this sub-graph invocation.
   toolCallLog:     Annotation<string[]>({ reducer: (a, b) => [...a, ...b], default: () => [] }),
+  threadId:        Annotation<string>({ reducer: (_, b) => b, default: () => '' }),
 });
 
 type ExpertSubStateType = typeof ExpertSubState.State;
@@ -58,6 +60,7 @@ export function createExpertSubGraph(
   tools: ExpertTool[],
   systemPrompt: string,
   name: string,
+  runtime?: RuntimeCostPolicy,
 ) {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const agentModel = (model as any).bindTools(tools);
@@ -71,7 +74,13 @@ export function createExpertSubGraph(
     let lastErr: unknown;
     for (let attempt = 1; attempt <= 2; attempt++) {
       try {
-        const response = (await agentModel.invoke(msgs)) as AIMessage;
+        const response = await runWithRuntimeCostPolicy({
+          runtime,
+          nodeName: `${name}Expert`,
+          agentName: `${name}_expert`,
+          threadId: state.threadId,
+          fn: () => agentModel.invoke(msgs) as Promise<AIMessage>,
+        });
         return { messages: [response] };
       } catch (e) {
         lastErr = e;
@@ -248,35 +257,38 @@ const COMPLIANCE_SYSTEM = `你是合规与数据治理专家，专注于法规�
 
 // ─── Expert factories ─────────────────────────────────────────────────────────
 
-export function createFunctionalExpert(model: ChatOpenAI) {
+export function createFunctionalExpert(model: ChatOpenAI, runtime?: RuntimeCostPolicy) {
   return createExpertSubGraph(
     model,
     [searchRequirementTool, checkConflictsTool],
     FUNCTIONAL_SYSTEM,
     'functional',
+    runtime,
   );
 }
 
-export function createPerformanceExpert(model: ChatOpenAI) {
+export function createPerformanceExpert(model: ChatOpenAI, runtime?: RuntimeCostPolicy) {
   return createExpertSubGraph(
     model,
     [searchRequirementTool, loadPerfBaselineTool, checkPerfBudgetTool],
     PERFORMANCE_SYSTEM,
     'performance',
+    runtime,
   );
 }
 
-export function createSecurityExpert(model: ChatOpenAI) {
+export function createSecurityExpert(model: ChatOpenAI, runtime?: RuntimeCostPolicy) {
   return createExpertSubGraph(
     model,
     [searchRequirementTool, checkConflictsTool, checkSecurityPolicyTool],
     SECURITY_SYSTEM,
     'security',
+    runtime,
   );
 }
 
-export function createComplianceExpert(model: ChatOpenAI) {
-  return createExpertSubGraph(model, [searchRequirementTool], COMPLIANCE_SYSTEM, 'compliance');
+export function createComplianceExpert(model: ChatOpenAI, runtime?: RuntimeCostPolicy) {
+  return createExpertSubGraph(model, [searchRequirementTool], COMPLIANCE_SYSTEM, 'compliance', runtime);
 }
 
 // ─── Supervisor schema & prompt ───────────────────────────────────────────────
@@ -321,6 +333,7 @@ export const SupervisorSubState = Annotation.Root({
   securityAnalysis:    Annotation<string>({ reducer: (_, b) => b, default: () => '' }),
   complianceAnalysis:  Annotation<string>({ reducer: (_, b) => b, default: () => '' }),
   analysisResult:      Annotation<string>({ reducer: (_, b) => b, default: () => '' }),
+  threadId:            Annotation<string>({ reducer: (_, b) => b, default: () => '' }),
   // Per-expert tool call logs (surfaced from expert sub-graphs).
   functionalToolCalls:  Annotation<string[]>({ reducer: (_, b) => b, default: () => [] }),
   performanceToolCalls: Annotation<string[]>({ reducer: (_, b) => b, default: () => [] }),
@@ -352,9 +365,10 @@ export type SupervisorSubStateType = typeof SupervisorSubState.State;
 
 export function createAnalysisSupervisorSubGraph(
   model: ChatOpenAI,
-  opts?: { forceFailExperts?: string[] },
+  opts?: { forceFailExperts?: string[]; runtime?: RuntimeCostPolicy },
 ) {
   const forceFailExperts = opts?.forceFailExperts ?? [];
+  const runtime = opts?.runtime;
   // ── supervisor ───────────────────────────────────────────────────────────
   const supervisorNode = async (
     state: SupervisorSubStateType,
@@ -363,10 +377,16 @@ export function createAnalysisSupervisorSubGraph(
     try {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const structured = (model as any).withStructuredOutput(supervisorSchema);
-      const result = await structured.invoke([
+      const result = await runWithRuntimeCostPolicy({
+        runtime,
+        nodeName: 'supervisor',
+        agentName: 'supervisor',
+        threadId: state.threadId,
+        fn: () => structured.invoke([
         new SystemMessage(SUPERVISOR_SYSTEM),
         new HumanMessage(`需求内容：\n\n${state.extracted}`),
-      ]) as z.infer<typeof supervisorSchema>;
+        ]) as Promise<z.infer<typeof supervisorSchema>>,
+      });
       log.info(
         { activeExperts: result.activeExperts, reasoning: result.reasoning },
         'supervisor_experts_selected',
@@ -382,10 +402,10 @@ export function createAnalysisSupervisorSubGraph(
   };
 
   // ── pre-build expert sub-graphs (once per supervisor instance) ────────────
-  const functionalSubGraph  = createFunctionalExpert(model);
-  const performanceSubGraph = createPerformanceExpert(model);
-  const securitySubGraph    = createSecurityExpert(model);
-  const complianceSubGraph  = createComplianceExpert(model);
+  const functionalSubGraph  = createFunctionalExpert(model, runtime);
+  const performanceSubGraph = createPerformanceExpert(model, runtime);
+  const securitySubGraph    = createSecurityExpert(model, runtime);
+  const complianceSubGraph  = createComplianceExpert(model, runtime);
 
   // ── expert nodes ──────────────────────────────────────────────────────────
 
@@ -409,6 +429,7 @@ export function createAnalysisSupervisorSubGraph(
         expertOutput:    '',
         expertLoopCount: 0,
         toolCallLog:     [],
+        threadId:        state.threadId,
       });
       const durationMs = Date.now() - startMs;
       log.info(
@@ -452,6 +473,7 @@ export function createAnalysisSupervisorSubGraph(
         expertOutput:    '',
         expertLoopCount: 0,
         toolCallLog:     [],
+        threadId:        state.threadId,
       });
       const durationMs = Date.now() - startMs;
       log.info(
@@ -495,6 +517,7 @@ export function createAnalysisSupervisorSubGraph(
         expertOutput:    '',
         expertLoopCount: 0,
         toolCallLog:     [],
+        threadId:        state.threadId,
       });
       const durationMs = Date.now() - startMs;
       log.info(
@@ -538,6 +561,7 @@ export function createAnalysisSupervisorSubGraph(
         expertOutput:    '',
         expertLoopCount: 0,
         toolCallLog:     [],
+        threadId:        state.threadId,
       });
       const durationMs = Date.now() - startMs;
       log.info(

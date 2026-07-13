@@ -47,6 +47,8 @@ export interface FormComponent {
   description?: string;
   fields: FormField[];
   submitLabel?: string;
+  resumeToken?: string;
+  interruptKind?: 'clarification';
 }
 
 export interface ConfirmationComponent {
@@ -58,6 +60,10 @@ export interface ConfirmationComponent {
   confirmLabel?: string;
   cancelLabel?: string;
   variant?: 'default' | 'warning' | 'danger';
+  inputLabel?: string;
+  inputPlaceholder?: string;
+  resumeToken?: string;
+  interruptKind?: 'summary_review';
 }
 
 export interface CardField {
@@ -132,6 +138,23 @@ export interface ActionButtonsComponent {
   layout?: 'horizontal' | 'vertical';
 }
 
+export interface DocumentResultItem {
+  chunkId: string;
+  documentId: string;
+  filename: string;
+  snippet: string;
+  score: number;
+  chunkIndex?: number;
+  mimeType?: string;
+}
+
+export interface DocumentResultsComponent {
+  type: 'document_results';
+  id: string;
+  title?: string;
+  items: DocumentResultItem[];
+}
+
 // ─── Union ───────────────────────────────────────────────────────────────────
 
 export type UIComponent =
@@ -142,7 +165,8 @@ export type UIComponent =
   | CardComponent
   | StepsComponent
   | TableComponent
-  | ActionButtonsComponent;
+  | ActionButtonsComponent
+  | DocumentResultsComponent;
 
 // ─── AI response wrapper ─────────────────────────────────────────────────────
 

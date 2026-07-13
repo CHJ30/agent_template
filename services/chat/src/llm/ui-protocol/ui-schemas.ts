@@ -49,6 +49,8 @@ export const formComponentSchema = z.object({
   description: z.string().optional(),
   fields: z.array(formFieldSchema),
   submitLabel: z.string().optional(),
+  resumeToken: z.string().optional(),
+  interruptKind: z.literal('clarification').optional(),
 });
 
 export const confirmationComponentSchema = z.object({
@@ -60,6 +62,10 @@ export const confirmationComponentSchema = z.object({
   confirmLabel: z.string().optional(),
   cancelLabel: z.string().optional(),
   variant: z.enum(['default', 'warning', 'danger']).optional(),
+  inputLabel: z.string().optional(),
+  inputPlaceholder: z.string().optional(),
+  resumeToken: z.string().optional(),
+  interruptKind: z.literal('summary_review').optional(),
 });
 
 export const cardFieldSchema = z.object({
@@ -129,6 +135,23 @@ export const actionButtonsComponentSchema = z.object({
   layout: z.enum(['horizontal', 'vertical']).optional(),
 });
 
+export const documentResultItemSchema = z.object({
+  chunkId: z.string(),
+  documentId: z.string(),
+  filename: z.string(),
+  snippet: z.string(),
+  score: z.number(),
+  chunkIndex: z.number().optional(),
+  mimeType: z.string().optional(),
+});
+
+export const documentResultsComponentSchema = z.object({
+  type: z.literal('document_results'),
+  id: z.string(),
+  title: z.string().optional(),
+  items: z.array(documentResultItemSchema),
+});
+
 // ─── Discriminated union ──────────────────────────────────────────────────────
 
 export const uiResponseSchema = z.discriminatedUnion('type', [
@@ -140,6 +163,7 @@ export const uiResponseSchema = z.discriminatedUnion('type', [
   stepsComponentSchema,
   tableComponentSchema,
   actionButtonsComponentSchema,
+  documentResultsComponentSchema,
 ]);
 
 // ─── Full AI response (used with withStructuredOutput) ────────────────────────

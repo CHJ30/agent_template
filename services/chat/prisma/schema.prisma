@@ -58,12 +58,15 @@ model documents {
 }
 
 model document_chunks {
-  id         String                 @id @default(cuid())
+  id         String                    @id @default(cuid())
   documentId String
-  document   documents              @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  document   documents                 @relation(fields: [documentId], references: [id], onDelete: Cascade)
   content    String
   chunkIndex Int
-  embedding  Unsupported("vector")?
+  // Fixed at 384 dims (Xenova/paraphrase-multilingual-MiniLM-L12-v2's output
+  // size) so Postgres itself rejects any future insert with a mismatched
+  // dimension instead of failing later at query time inside a <=> comparison.
+  embedding  Unsupported("vector(384)")?
 }
 
 model task_events {
@@ -88,4 +91,62 @@ model requirement_reports {
   summary        String                              // final markdown report (queried back later)
   status         String   @default("completed")
   createdAt      DateTime @default(now())
+}
+
+model pipeline_test_cases {
+  id          String   @id
+  title       String
+  description String
+  input       String
+  tickets     Json
+  enabled     Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model llm_cost_records {
+  id               String   @id @default(cuid())
+  sessionId        String
+  requestId        String
+  nodeName         String
+  modelName        String
+  systemPrompt     String
+  toolSchemas      String?
+  messages         String?
+  outputText       String
+  inputTokens      Int
+  outputTokens     Int
+  estimatedCostUsd Float
+  createdAt        DateTime @default(now())
+
+  @@index([sessionId, createdAt])
+  @@index([requestId])
+}
+
+model token_usages {
+  id                String   @id @default(cuid())
+  conversationId    String?  @db.VarChar(255)
+  messageId         String?  @db.VarChar(255)
+  threadId          String?  @db.VarChar(255)
+  graphName         String   @db.VarChar(100)
+  nodeName          String   @db.VarChar(100)
+  agentName         String   @db.VarChar(100)
+  modelConfigId     String?  @db.VarChar(255)
+  modelName         String   @db.VarChar(100)
+  provider          String   @default("openai") @db.VarChar(100)
+  inputTokens       Int      @default(0)
+  outputTokens      Int      @default(0)
+  totalTokens       Int      @default(0)
+  cachedInputTokens Int      @default(0)
+  estimatedCostUsd  Float    @default(0)
+  isEstimated       Boolean  @default(false)
+  latencyMs         Int      @default(0)
+  overrideReason    String?
+  createdAt         DateTime @default(now())
+
+  @@index([conversationId])
+  @@index([graphName, nodeName])
+  @@index([agentName])
+  @@index([modelConfigId])
+  @@index([createdAt])
 }

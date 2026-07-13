@@ -19,6 +19,13 @@ import { UIFlowService } from './ui-protocol/ui-flow.service.js';
 import { UIChatController } from './ui-protocol/ui-chat.controller.js';
 import { loadLangchainConfig } from './model.factory.js';
 import { LLM_CONFIG } from './llm.constants.js';
+import { ConversationService } from '../conversation/conversation.service.js';
+import { PipelineDemoController } from './pipeline-demo/pipeline-demo.controller.js';
+import { PipelineDemoService } from './pipeline-demo/pipeline-demo.service.js';
+import { TokenUsageController } from './cost/token-usage.controller.js';
+import { RagDemoController } from '../../rag/demo/rag-demo.controller.js';
+import { RagDemoService } from '../../rag/demo/rag-demo.service.js';
+import { LegalKnowledgeIngestionService } from '../../rag/ingestion/legal-knowledge-ingestion.service.js';
 
 @Module({
   imports: [AuthModule, MessageModule, DocumentModule],
@@ -29,10 +36,14 @@ import { LLM_CONFIG } from './llm.constants.js';
     AgentsController,
     AdvancedController,
     UIChatController,
+    PipelineDemoController,
+    TokenUsageController,
+    RagDemoController,
   ],
   providers: [
     { provide: LLM_CONFIG, useValue: loadLangchainConfig() },
     RunnableMemoryService,
+    ConversationService,
     EmbeddingService,
     VectorStoreService,
     FilesystemService,
@@ -41,6 +52,9 @@ import { LLM_CONFIG } from './llm.constants.js';
     AdvancedAnalysisService,
     UIResponseService,
     UIFlowService,
+    PipelineDemoService,
+    RagDemoService,
+    LegalKnowledgeIngestionService,
   ],
   exports: [AdvancedAnalysisService],
 })
