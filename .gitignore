@@ -30,6 +30,7 @@
 # Remove the "!" line below if you use .env.example files and want to commit them
 **/.env
 **/.env.*
+!**/.env.example
 
 # ─── TypeScript ───────────────────────────────────────────────────────────────
 **/*.tsbuildinfo
