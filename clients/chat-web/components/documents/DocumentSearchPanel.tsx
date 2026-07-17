@@ -40,6 +40,14 @@ export function DocumentSearchPanel({ token }: Props) {
           chunkIndex: item.chunkIndex,
           snippet: toSnippet(item.content),
           score: item.score,
+          sourceTitle: item.sourceTitle,
+          sourceUrl: item.sourceUrl,
+          sectionTitle: item.sectionTitle,
+          pageNumber: item.pageNumber,
+          startOffset: item.startOffset,
+          endOffset: item.endOffset,
+          documentVersion: item.documentVersion,
+          contentHash: item.contentHash,
         })),
       });
     } catch (err) {

@@ -9,11 +9,14 @@ import {
   UploadedFile,
   HttpCode,
   HttpStatus,
+  Body,
+  StreamableFile,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { memoryStorage } from 'multer';
 import type { FileFilterCallback } from 'multer';
 import type { Request } from 'express';
+import * as fs from 'fs';
 import { JwtAuthGuard } from '../auth/jwt.guard.js';
 import { CurrentUser } from '../auth/current-user.decorator.js';
 import { DocumentService } from './document.service.js';
@@ -80,6 +83,34 @@ export class DocumentController {
   @Get()
   findAll(@CurrentUser() user: { userId: string }) {
     return this.documentService.findByUser(user.userId);
+  }
+
+  @Post('citations/verify')
+  verifyCitation(
+    @CurrentUser() user: { userId: string },
+    @Body() body: {
+      documentId: string;
+      documentVersion: string;
+      chunkId: string;
+      startOffset: number;
+      endOffset: number;
+      quote: string;
+      contentHash: string;
+    },
+  ) {
+    return this.documentService.verifyCitation(user.userId, body);
+  }
+
+  @Get(':id/source')
+  async source(
+    @CurrentUser() user: { userId: string },
+    @Param('id') id: string,
+  ) {
+    const { doc, absolutePath } = await this.documentService.source(id, user.userId);
+    return new StreamableFile(fs.createReadStream(absolutePath), {
+      type: doc.mimeType,
+      disposition: `inline; filename*=UTF-8''${encodeURIComponent(doc.filename)}`,
+    });
   }
 
   @Get(':id/chunks')

@@ -7,6 +7,7 @@ import {
 import * as fs from 'fs';
 import * as path from 'path';
 import { PrismaService } from '../prisma/prisma.service.js';
+import { createHash } from 'crypto';
 
 const ALLOWED_MIME_TYPES = new Set([
   'text/plain',
@@ -56,6 +57,7 @@ export class DocumentService {
         filePath: relativePath,
         storageType: 'local',
         status: 'pending',
+        sourceTitle: originalName,
       },
     });
   }
@@ -84,9 +86,54 @@ export class DocumentService {
         id: true,
         content: true,
         chunkIndex: true,
+        documentVersion: true,
+        sectionTitle: true,
+        pageNumber: true,
+        startOffset: true,
+        endOffset: true,
+        contentHash: true,
       },
       orderBy: { chunkIndex: 'asc' },
     });
+  }
+
+  async source(documentId: string, userId: string) {
+    const doc = await this.findById(documentId, userId);
+    if (!doc.filePath) throw new NotFoundException('Document source file not found');
+    const absolutePath = path.resolve(process.cwd(), doc.filePath);
+    if (!fs.existsSync(absolutePath)) throw new NotFoundException('Document source file not found');
+    return { doc, absolutePath };
+  }
+
+  async verifyCitation(userId: string, input: {
+    documentId: string;
+    documentVersion: string;
+    chunkId: string;
+    startOffset: number;
+    endOffset: number;
+    quote: string;
+    contentHash: string;
+  }) {
+    const doc = await this.findById(input.documentId, userId);
+    const chunk = await this.prisma.document_chunks.findUnique({ where: { id: input.chunkId } });
+    const reasons: string[] = [];
+    if (!chunk) reasons.push('chunk_not_found');
+    if (chunk && chunk.documentId !== doc.id) reasons.push('chunk_document_mismatch');
+    if (doc.version !== input.documentVersion || chunk?.documentVersion !== input.documentVersion) {
+      reasons.push('document_version_mismatch');
+    }
+    const canonicalText = doc.canonicalText ?? '';
+    if (input.startOffset < 0 || input.endOffset < input.startOffset || input.endOffset > canonicalText.length) {
+      reasons.push('offset_out_of_range');
+    }
+    const exactText = canonicalText.slice(input.startOffset, input.endOffset);
+    if (exactText !== input.quote) reasons.push('quote_mismatch');
+    const hash = createHash('sha256').update(input.quote).digest('hex');
+    if (hash !== input.contentHash || chunk?.contentHash !== input.contentHash) reasons.push('content_hash_mismatch');
+    if (chunk && (chunk.startOffset !== input.startOffset || chunk.endOffset !== input.endOffset)) {
+      reasons.push('chunk_offset_mismatch');
+    }
+    return { valid: reasons.length === 0, reasons, exactText, documentVersion: doc.version };
   }
 
   async delete(documentId: string, userId: string): Promise<void> {

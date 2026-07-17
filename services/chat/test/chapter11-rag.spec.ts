@@ -13,6 +13,8 @@ const answer = {
   citations: [{
     documentId: 'civil-code', filename: '中华人民共和国民法典.md', chunkId: 'c-1',
     chunkIndex: 1, score: 0.9, snippet: '民事主体从事民事活动……',
+    quote: '民事主体从事民事活动……', sourceTitle: '中华人民共和国民法典',
+    startOffset: 0, endOffset: 13, documentVersion: '1', contentHash: 'test-hash',
   }],
   insufficientContext: false,
 };
@@ -196,10 +198,14 @@ describe('11.13 Reranker', () => {
     {
       id: 'first', content: '一般合同规则', documentId: 'doc-1', filename: 'civil.pdf',
       mimeType: 'application/pdf', chunkIndex: 1, score: 0.03, scoreType: 'rrf' as const,
+      sourceTitle: '中华人民共和国民法典', startOffset: 0, endOffset: 6,
+      documentVersion: '1', contentHash: 'hash-1',
     },
     {
       id: 'second', content: '违约损害赔偿规则', documentId: 'doc-1', filename: 'civil.pdf',
       mimeType: 'application/pdf', chunkIndex: 2, score: 0.02, scoreType: 'rrf' as const,
+      sourceTitle: '中华人民共和国民法典', startOffset: 7, endOffset: 15,
+      documentVersion: '1', contentHash: 'hash-2',
     },
   ];
 

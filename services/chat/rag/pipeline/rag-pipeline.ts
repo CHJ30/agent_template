@@ -9,6 +9,15 @@ export interface RagCitation {
   score: number;
   scoreType?: 'cosine' | 'bm25' | 'rrf' | 'reranker';
   snippet: string;
+  quote: string;
+  sourceTitle: string;
+  sourceUrl?: string | null;
+  sectionTitle?: string | null;
+  pageNumber?: number | null;
+  startOffset: number;
+  endOffset: number;
+  documentVersion: string;
+  contentHash: string;
 }
 
 export interface RagAnswer {
@@ -161,6 +170,15 @@ export async function ragAsk(input: RagAskInput, deps: RagAskDeps): Promise<RagA
     score: result.score,
     scoreType: result.scoreType,
     snippet: result.content.replace(/\s+/g, ' ').trim().slice(0, 260),
+    quote: result.content,
+    sourceTitle: result.sourceTitle,
+    sourceUrl: result.sourceUrl,
+    sectionTitle: result.sectionTitle,
+    pageNumber: result.pageNumber,
+    startOffset: result.startOffset,
+    endOffset: result.endOffset,
+    documentVersion: result.documentVersion,
+    contentHash: result.contentHash,
     sourceNumber: index + 1,
   }));
 
@@ -174,7 +192,10 @@ export async function ragAsk(input: RagAskInput, deps: RagAskDeps): Promise<RagA
   }
 
   const context = results.map((result, index) =>
-    `[来源${index + 1}] 文件：${result.filename}；Chunk：${result.chunkIndex}；${result.scoreType === 'reranker' ? '重排分数' : result.scoreType === 'rrf' ? 'RRF分数' : '相似度'}：${result.score.toFixed(4)}\n${result.content}`,
+    `[来源${index + 1}] 标题：${result.sourceTitle}；版本：${result.documentVersion}；` +
+    `章节：${result.sectionTitle ?? '未标注'}；页码：${result.pageNumber ?? '未标注'}；` +
+    `Chunk：${result.id}；原文范围：${result.startOffset}-${result.endOffset}；` +
+    `${result.scoreType === 'reranker' ? '重排分数' : result.scoreType === 'rrf' ? 'RRF分数' : '检索分数'}：${result.score.toFixed(4)}\n${result.content}`,
   ).join('\n\n---\n\n');
   const generationStartedAt = Date.now();
   const response = await deps.invokeModel([
