@@ -1,8 +1,8 @@
-# 法律小助手（Law Agent）
+# 产品小助手（Product Assistant）
 
 [English](./README_EN.md) | 简体中文
 
-一个面向法律知识检索、需求分析和人工协作审核的全栈多 Agent 示例项目。项目使用 LangGraph 编排结构化 Agent、并行专家、ReAct 工具循环、Actor–Critic–Refine 总结和 Human-in-the-Loop（HITL）中断；法律 RAG 支持混合检索、重排以及可跳转、可高亮、可校验的原文引用。
+一个面向产品需求分析、知识检索和人工协作审核的全栈多 Agent 产品助手。项目使用 LangGraph 编排结构化 Agent、并行专家、ReAct 工具循环、Actor–Critic–Refine 总结和 Human-in-the-Loop（HITL）中断；内置的法律 RAG 示例支持混合检索、重排以及可跳转、可高亮、可校验的原文引用。
 
 > 本项目输出仅供法律知识参考，不构成正式法律意见。重大事项请咨询执业律师。
 
@@ -407,4 +407,4 @@ bunx prisma migrate deploy
 
 ## License
 
-当前仓库未提供独立的根目录 License 文件。发布或分发前请补充适用的许可证和第三方依赖声明。
+本项目基于 [The Unlicense](./LICENSE) 开放，不包含个人版权声明。任何人均可为商业或非商业目的自由复制、修改、发布、使用、编译、销售和分发本软件。

@@ -1,8 +1,8 @@
-# Law Agent
+# Product Assistant
 
 English | [简体中文](./README.md)
 
-A full-stack, multi-agent reference project for legal knowledge retrieval, requirement analysis, and human review workflows. It uses LangGraph to orchestrate structured agents, parallel experts, ReAct tool loops, Actor–Critic–Refine summarization, and Human-in-the-Loop (HITL) interrupts. Its legal RAG pipeline supports hybrid retrieval, reranking, and traceable citations that can be opened, highlighted, and deterministically verified.
+A full-stack multi-agent product assistant for product requirement analysis, knowledge retrieval, and human review workflows. It uses LangGraph to orchestrate structured agents, parallel experts, ReAct tool loops, Actor–Critic–Refine summarization, and Human-in-the-Loop (HITL) interrupts. The included legal RAG example supports hybrid retrieval, reranking, and traceable citations that can be opened, highlighted, and deterministically verified.
 
 > The output of this project is for legal knowledge reference only and does not constitute formal legal advice. Consult a qualified lawyer for material matters.
 
@@ -405,4 +405,4 @@ This repository is a feature-rich engineering reference and testing platform wit
 
 ## License
 
-The repository currently has no root-level license file. Add the applicable license and third-party notices before publishing or redistributing it.
+This project is released under [The Unlicense](./LICENSE) without a personal copyright notice. Anyone may freely copy, modify, publish, use, compile, sell, or distribute the software for commercial or non-commercial purposes.
