@@ -11,6 +11,14 @@ interface ChunkRow {
   mimeType: string;
   chunkIndex: number;
   score: number;
+  sourceTitle: string;
+  sourceUrl: string | null;
+  sectionTitle: string | null;
+  pageNumber: number | null;
+  startOffset: number;
+  endOffset: number;
+  documentVersion: string;
+  contentHash: string;
 }
 
 export interface SearchResult {
@@ -22,6 +30,14 @@ export interface SearchResult {
   chunkIndex: number;
   score: number;
   scoreType?: 'cosine' | 'bm25' | 'rrf' | 'reranker';
+  sourceTitle: string;
+  sourceUrl?: string | null;
+  sectionTitle?: string | null;
+  pageNumber?: number | null;
+  startOffset: number;
+  endOffset: number;
+  documentVersion: string;
+  contentHash: string;
 }
 
 @Injectable()
@@ -49,6 +65,14 @@ export class SearchService {
         dc."chunkIndex",
         d.filename,
         d."mimeType",
+        COALESCE(d."sourceTitle", d.filename) AS "sourceTitle",
+        d."sourceUrl",
+        dc."sectionTitle",
+        dc."pageNumber",
+        dc."startOffset",
+        dc."endOffset",
+        dc."documentVersion",
+        dc."contentHash",
         (1 - (dc.embedding <=> ${vectorStr}::vector))::float8 AS score
       FROM document_chunks dc
       JOIN documents d ON d.id = dc."documentId"
@@ -85,6 +109,9 @@ export class SearchService {
         SELECT
           dc.id, dc.content, dc."documentId", dc."chunkIndex",
           d.filename, d."mimeType",
+          COALESCE(d."sourceTitle", d.filename) AS "sourceTitle", d."sourceUrl",
+          dc."sectionTitle", dc."pageNumber", dc."startOffset", dc."endOffset",
+          dc."documentVersion", dc."contentHash",
           GREATEST(char_length(dc.content), 1)::float8 AS document_length
         FROM document_chunks dc
         JOIN documents d ON d.id = dc."documentId"
@@ -107,7 +134,9 @@ export class SearchService {
       scored AS (
         SELECT
           corpus.id, corpus.content, corpus."documentId", corpus."chunkIndex",
-          corpus.filename, corpus."mimeType",
+          corpus.filename, corpus."mimeType", corpus."sourceTitle", corpus."sourceUrl",
+          corpus."sectionTitle", corpus."pageNumber", corpus."startOffset", corpus."endOffset",
+          corpus."documentVersion", corpus."contentHash",
           SUM(
             ln(1 + (corpus_stats.document_count - term_stats.document_frequency + 0.5)
               / (term_stats.document_frequency + 0.5))
@@ -131,10 +160,14 @@ export class SearchService {
         WHERE frequencies.term_frequency > 0
         GROUP BY
           corpus.id, corpus.content, corpus."documentId", corpus."chunkIndex",
-          corpus.filename, corpus."mimeType", corpus.document_length,
+          corpus.filename, corpus."mimeType", corpus."sourceTitle", corpus."sourceUrl",
+          corpus."sectionTitle", corpus."pageNumber", corpus."startOffset", corpus."endOffset",
+          corpus."documentVersion", corpus."contentHash", corpus.document_length,
           corpus_stats.document_count, corpus_stats.average_length
       )
-      SELECT id, content, "documentId", "chunkIndex", filename, "mimeType", score
+      SELECT id, content, "documentId", "chunkIndex", filename, "mimeType",
+             "sourceTitle", "sourceUrl", "sectionTitle", "pageNumber",
+             "startOffset", "endOffset", "documentVersion", "contentHash", score
       FROM scored
       ORDER BY score DESC, "chunkIndex" ASC
       LIMIT $${limitParameter}::int

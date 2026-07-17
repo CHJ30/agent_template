@@ -45,6 +45,13 @@ function statusLabel(status: string) {
   }
 }
 
+function HighlightedChunk({ chunk, start, end }: { chunk: DocumentChunk; start: number | null; end: number | null }) {
+  const localStart = start === null ? 0 : Math.max(0, Math.min(chunk.content.length, start - chunk.startOffset));
+  const localEnd = end === null ? chunk.content.length : Math.max(localStart, Math.min(chunk.content.length, end - chunk.startOffset));
+  if (localStart === localEnd) return <>{chunk.content}</>;
+  return <>{chunk.content.slice(0, localStart)}<mark className="bg-yellow-300 text-black">{chunk.content.slice(localStart, localEnd)}</mark>{chunk.content.slice(localEnd)}</>;
+}
+
 export default function DocumentDetailPage() {
   const params = useParams<{ id: string }>();
   const searchParams = useSearchParams();
@@ -56,6 +63,11 @@ export default function DocumentDetailPage() {
   const [error, setError] = useState<string | null>(null);
   const user = USERS[userKey];
   const chunkId = searchParams.get("chunk");
+  const requestedVersion = searchParams.get("version");
+  const startParam = searchParams.get("start");
+  const endParam = searchParams.get("end");
+  const requestedStart = startParam !== null && Number.isFinite(Number(startParam)) ? Number(startParam) : null;
+  const requestedEnd = endParam !== null && Number.isFinite(Number(endParam)) ? Number(endParam) : null;
 
   const documentId = useMemo(() => {
     const raw = params.id;
@@ -181,8 +193,16 @@ export default function DocumentDetailPage() {
                         >
                           <div className="mb-2 text-xs font-medium text-gray-400">
                             分块 {chunk.chunkIndex + 1}
+                            {chunk.sectionTitle ? ` · ${chunk.sectionTitle}` : ""}
+                            {chunk.pageNumber ? ` · 第 ${chunk.pageNumber} 页` : ""}
+                            {` · 版本 ${chunk.documentVersion} · ${chunk.startOffset}-${chunk.endOffset}`}
                           </div>
-                          <p className="whitespace-pre-wrap text-sm leading-6 text-gray-700">{chunk.content}</p>
+                          {active && requestedVersion && requestedVersion !== chunk.documentVersion && (
+                            <div className="mb-2 bg-amber-100 px-2 py-1 text-xs text-amber-800">引用版本与当前文档版本不一致</div>
+                          )}
+                          <p className="whitespace-pre-wrap text-sm leading-6 text-gray-700">
+                            {active ? <HighlightedChunk chunk={chunk} start={requestedStart} end={requestedEnd} /> : chunk.content}
+                          </p>
                         </article>
                       );
                     })

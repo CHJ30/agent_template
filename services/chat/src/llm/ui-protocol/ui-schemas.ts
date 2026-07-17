@@ -143,6 +143,14 @@ export const documentResultItemSchema = z.object({
   score: z.number(),
   chunkIndex: z.number().optional(),
   mimeType: z.string().optional(),
+  sourceTitle: z.string(),
+  sourceUrl: z.string().nullable().optional(),
+  sectionTitle: z.string().nullable().optional(),
+  pageNumber: z.number().nullable().optional(),
+  startOffset: z.number().int().nonnegative(),
+  endOffset: z.number().int().nonnegative(),
+  documentVersion: z.string(),
+  contentHash: z.string(),
 });
 
 export const documentResultsComponentSchema = z.object({

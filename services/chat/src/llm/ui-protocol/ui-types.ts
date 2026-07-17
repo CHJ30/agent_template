@@ -146,6 +146,14 @@ export interface DocumentResultItem {
   score: number;
   chunkIndex?: number;
   mimeType?: string;
+  sourceTitle: string;
+  sourceUrl?: string | null;
+  sectionTitle?: string | null;
+  pageNumber?: number | null;
+  startOffset: number;
+  endOffset: number;
+  documentVersion: string;
+  contentHash: string;
 }
 
 export interface DocumentResultsComponent {

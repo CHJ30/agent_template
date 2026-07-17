@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { AppHeader } from "../../components/AppHeader";
@@ -15,6 +16,15 @@ interface Citation {
   score: number;
   scoreType?: 'cosine' | 'bm25' | 'rrf' | 'reranker';
   snippet: string;
+  quote: string;
+  sourceTitle: string;
+  sourceUrl?: string | null;
+  sectionTitle?: string | null;
+  pageNumber?: number | null;
+  startOffset: number;
+  endOffset: number;
+  documentVersion: string;
+  contentHash: string;
 }
 interface RagResponse {
   answer?: string;
@@ -35,6 +45,23 @@ interface RagTrace {
   generation: { status: "completed" | "skipped"; durationMs: number };
 }
 interface Message { id: string; role: "user" | "assistant"; text: string; result?: RagResponse; }
+
+function citationHref(citation: Citation): string {
+  const params = new URLSearchParams({
+    chunk: citation.chunkId,
+    version: citation.documentVersion,
+    start: String(citation.startOffset),
+    end: String(citation.endOffset),
+  });
+  return `/documents/${citation.documentId}?${params.toString()}`;
+}
+
+function linkifyCitationMarkers(text: string, citations: Citation[] = []): string {
+  return text.replace(/\[来源(\d+)\]/g, (marker, rawIndex: string) => {
+    const citation = citations[Number(rawIndex) - 1];
+    return citation ? `[${marker}](${citationHref(citation)})` : marker;
+  });
+}
 interface IngestionStatus {
   status: "idle" | "running" | "completed" | "failed";
   stage: string;
@@ -306,15 +333,25 @@ export default function RagDemoPage() {
             ) : (
               <div key={message.id} className="max-w-[88%] rounded-2xl rounded-tl-sm border border-slate-200 bg-slate-50 p-4">
                 {message.result?.trace && <RagTracePanel trace={message.result.trace} />}
-                <div className="prose prose-sm max-w-none text-slate-700"><ReactMarkdown remarkPlugins={[remarkGfm]}>{message.text}</ReactMarkdown></div>
+                <div className="prose prose-sm max-w-none text-slate-700"><ReactMarkdown remarkPlugins={[remarkGfm]}>{linkifyCitationMarkers(message.text, message.result?.citations)}</ReactMarkdown></div>
                 {!!message.result?.citations?.length && (
                   <div className="mt-4 border-t border-slate-200 pt-3">
                     <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-400">引用来源</div>
                     <div className="space-y-2">{message.result.citations.map((citation, index) => (
                       <div key={citation.chunkId} className="rounded-lg border border-slate-200 bg-white p-3 text-xs">
-                        <div className="flex items-center justify-between gap-3"><span className="font-semibold text-blue-700">[来源{index + 1}] {citation.filename}</span><span className="font-mono text-slate-400">{citation.scoreType === 'reranker' ? `重排 ${(citation.score * 100).toFixed(1)}%` : citation.scoreType === 'rrf' ? `RRF ${citation.score.toFixed(4)}` : citation.scoreType === 'bm25' ? `BM25 ${citation.score.toFixed(4)}` : `相似度 ${(citation.score * 100).toFixed(1)}%`}</span></div>
-                        <div className="mt-1 font-mono text-[10px] text-slate-400">Chunk {citation.chunkIndex} · {citation.documentId}</div>
-                        <p className="mt-2 leading-5 text-slate-600">{citation.snippet}</p>
+                        <div className="flex items-center justify-between gap-3">
+                          <span className="font-semibold text-blue-700">[来源{index + 1}] {citation.sourceTitle}</span>
+                          <span className="font-mono text-slate-400">{citation.scoreType === 'reranker' ? `重排 ${(citation.score * 100).toFixed(1)}%` : citation.scoreType === 'rrf' ? `RRF ${citation.score.toFixed(4)}` : citation.scoreType === 'bm25' ? `BM25 ${citation.score.toFixed(4)}` : `相似度 ${(citation.score * 100).toFixed(1)}%`}</span>
+                        </div>
+                        <div className="mt-1 text-[10px] text-slate-500">版本 {citation.documentVersion}{citation.sectionTitle ? ` · ${citation.sectionTitle}` : ""}{citation.pageNumber ? ` · 第 ${citation.pageNumber} 页` : ""}</div>
+                        <div className="mt-1 font-mono text-[10px] text-slate-400">Chunk {citation.chunkIndex} · {citation.startOffset}-{citation.endOffset}</div>
+                        <Link
+                          href={citationHref(citation)}
+                          className="mt-2 block border-l-2 border-blue-400 pl-2 leading-5 text-slate-600 underline decoration-dotted underline-offset-2 hover:bg-blue-50 hover:text-blue-800"
+                          title="点击跳转到原文并高亮引用范围"
+                        >
+                          {citation.quote || citation.snippet}
+                        </Link>
                       </div>
                     ))}</div>
                   </div>

@@ -53,6 +53,11 @@ model documents {
   storageType String            @default("local")
   status      String            @default("pending")
   chunkCount  Int               @default(0)
+  sourceTitle String?
+  sourceUrl   String?
+  version     String            @default("1")
+  contentHash String?
+  canonicalText String?
   createdAt   DateTime          @default(now())
   chunks      document_chunks[]
 }
@@ -63,6 +68,12 @@ model document_chunks {
   document   documents                 @relation(fields: [documentId], references: [id], onDelete: Cascade)
   content    String
   chunkIndex Int
+  documentVersion String @default("1")
+  sectionTitle String?
+  pageNumber Int?
+  startOffset Int @default(0)
+  endOffset Int @default(0)
+  contentHash String @default("")
   // Fixed at 384 dims (Xenova/paraphrase-multilingual-MiniLM-L12-v2's output
   // size) so Postgres itself rejects any future insert with a mismatched
   // dimension instead of failing later at query time inside a <=> comparison.

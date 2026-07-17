@@ -1,11 +1,11 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { RecursiveCharacterTextSplitter } from '@langchain/textsplitters';
 import { PrismaService } from '../../src/prisma/prisma.service.js';
 import { LocalEmbeddingService } from '../../src/document/embedding.service.js';
-import { parsePdf } from '../../src/document/parsers/pdf.parser.js';
+import { extractDocument } from '../../src/document/parsers/parser.factory.js';
 
 export interface LegalIngestionStatus {
   status: 'idle' | 'running' | 'completed' | 'failed';
@@ -22,7 +22,8 @@ export interface LegalIngestionStatus {
 const ARTICLE_RE = /第[零〇一二三四五六七八九十百千万两\d]+条(?:之[零〇一二三四五六七八九十百千万两\d]+)?/g;
 
 export function splitLegalTextByArticle(text: string, filename: string): string[] {
-  const normalized = text.replace(/\r/g, '').replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
+  void filename;
+  const normalized = text.replace(/\r/g, '');
   const matches = [...normalized.matchAll(ARTICLE_RE)];
   if (matches.length < 2) return [];
   const chunks: string[] = [];
@@ -30,7 +31,7 @@ export function splitLegalTextByArticle(text: string, filename: string): string[
     const start = matches[index]!.index!;
     const end = matches[index + 1]?.index ?? normalized.length;
     const article = normalized.slice(start, end).trim();
-    if (article) chunks.push(`文档：${filename}\n${article}`);
+    if (article) chunks.push(article);
   }
   return chunks;
 }
@@ -88,7 +89,9 @@ export class LegalKnowledgeIngestionService {
       for (const [fileIndex, filePath] of files.entries()) {
         const filename = path.basename(filePath);
         this.update(userId, { stage: 'parsing', currentFile: filename, message: `正在解析 ${filename}` });
-        const text = await parsePdf(filePath);
+        const parsed = await extractDocument(filePath, 'application/pdf');
+        const text = parsed.canonicalText;
+        const documentHash = createHash('sha256').update(text).digest('hex');
         this.update(userId, { stage: 'chunking', message: `正在按法条切分 ${filename}` });
         let chunks = splitLegalTextByArticle(text, filename);
         if (chunks.length === 0) chunks = await this.fallbackSplitter.splitText(text);
@@ -110,14 +113,37 @@ export class LegalKnowledgeIngestionService {
               data: {
                 userId, filename, mimeType: 'application/pdf', size: fs.statSync(filePath).size,
                 filePath: filePath.replace(/\\/g, '/'), storageType: 'knowledge', status: 'processing',
+                sourceTitle: filename,
               },
             });
         await this.prisma.document_chunks.deleteMany({ where: { documentId: doc.id } });
+        const parsedVersion = Number.parseInt(doc.version, 10);
+        const documentVersion = doc.contentHash
+          ? String(Number.isFinite(parsedVersion) ? parsedVersion + 1 : 1)
+          : '1';
+        let previousStart = -1;
         for (let index = 0; index < chunks.length; index++) {
+          const content = chunks[index]!;
+          let startOffset = text.indexOf(content, Math.max(0, previousStart + 1));
+          if (startOffset < 0) startOffset = text.indexOf(content);
+          if (startOffset < 0) throw new Error(`Unable to locate legal chunk ${index} in canonical text`);
+          previousStart = startOffset;
+          const endOffset = startOffset + content.length;
+          const block = parsed.blocks.find(item => startOffset >= item.startOffset && startOffset < item.endOffset)
+            ?? parsed.blocks.find(item => item.startOffset >= startOffset);
+          const articleTitle = content.match(ARTICLE_RE)?.[0] ?? block?.sectionTitle ?? null;
+          const chunkHash = createHash('sha256').update(content).digest('hex');
           const vector = `[${vectors[index]!.join(',')}]`;
           await this.prisma.$executeRaw`
-            INSERT INTO document_chunks (id, "documentId", content, "chunkIndex", embedding)
-            VALUES (${randomUUID()}, ${doc.id}, ${chunks[index]!}, ${index}, ${vector}::vector)
+            INSERT INTO document_chunks (
+              id, "documentId", content, "chunkIndex", embedding,
+              "documentVersion", "sectionTitle", "pageNumber",
+              "startOffset", "endOffset", "contentHash"
+            ) VALUES (
+              ${randomUUID()}, ${doc.id}, ${content}, ${index}, ${vector}::vector,
+              ${documentVersion}, ${articleTitle}, ${block?.pageNumber ?? null},
+              ${startOffset}, ${endOffset}, ${chunkHash}
+            )
           `;
           if (index % 20 === 0 || index === chunks.length - 1) {
             this.update(userId, {
@@ -127,7 +153,13 @@ export class LegalKnowledgeIngestionService {
           }
         }
         await this.prisma.documents.update({
-          where: { id: doc.id }, data: { status: 'done', chunkCount: chunks.length },
+          where: { id: doc.id },
+          data: {
+            status: 'done', chunkCount: chunks.length,
+            sourceTitle: doc.sourceTitle ?? filename,
+            sourceUrl: doc.sourceUrl ?? `/api/documents/${doc.id}/source`,
+            version: documentVersion, canonicalText: text, contentHash: documentHash,
+          },
         });
         this.update(userId, {
           processedFiles: fileIndex + 1,

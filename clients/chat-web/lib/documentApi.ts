@@ -11,12 +11,22 @@ export interface DocumentRecord {
   status: string;
   chunkCount: number;
   createdAt: string;
+  sourceTitle?: string | null;
+  sourceUrl?: string | null;
+  version: string;
+  contentHash?: string | null;
 }
 
 export interface DocumentChunk {
   id: string;
   content: string;
   chunkIndex: number;
+  documentVersion: string;
+  sectionTitle?: string | null;
+  pageNumber?: number | null;
+  startOffset: number;
+  endOffset: number;
+  contentHash: string;
 }
 
 export interface DocumentSearchResult {
@@ -27,6 +37,21 @@ export interface DocumentSearchResult {
   mimeType: string;
   chunkIndex: number;
   score: number;
+  sourceTitle: string;
+  sourceUrl?: string | null;
+  sectionTitle?: string | null;
+  pageNumber?: number | null;
+  startOffset: number;
+  endOffset: number;
+  documentVersion: string;
+  contentHash: string;
+}
+
+export interface CitationVerification {
+  valid: boolean;
+  reasons: string[];
+  exactText: string;
+  documentVersion: string;
 }
 
 export interface TaskEvent {
@@ -75,6 +100,26 @@ export async function fetchDocumentChunks(token: string, id: string): Promise<Do
     cache: "no-store",
   });
   return parseJson<DocumentChunk[]>(res);
+}
+
+export async function verifyCitation(
+  token: string,
+  citation: {
+    documentId: string;
+    documentVersion: string;
+    chunkId: string;
+    startOffset: number;
+    endOffset: number;
+    quote: string;
+    contentHash: string;
+  },
+): Promise<CitationVerification> {
+  const res = await fetch(`${API_BASE}/api/documents/citations/verify`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders(token) },
+    body: JSON.stringify(citation),
+  });
+  return parseJson<CitationVerification>(res);
 }
 
 export async function uploadDocument(token: string, file: File): Promise<DocumentRecord> {
