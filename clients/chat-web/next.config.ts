@@ -1,6 +1,33 @@
 import path from "node:path";
 import type { NextConfig } from "next";
-const backendUrl = process.env.API_BASE_URL || "http://localhost:8081";
+const DEFAULT_BACKEND_URL = "http://localhost:8081";
+
+const backendUrl = (() => {
+  const rawUrl = process.env.API_BASE_URL;
+
+  if (typeof rawUrl !== "string" || rawUrl.trim().length === 0) {
+    console.warn(
+      `[next.config] API_BASE_URL 未设置或不是有效字符串，使用默认值: ${DEFAULT_BACKEND_URL}`
+    );
+    return DEFAULT_BACKEND_URL;
+  }
+
+  const trimmedUrl = rawUrl.trim();
+
+  try {
+    // 校验 URL 格式是否合法，避免 rewrites 中出现无效目的地导致
+    // "TypeError: Expected \"8080\" to be a string" 之类的运行时错误
+    new URL(trimmedUrl);
+  } catch {
+    console.warn(
+      `[next.config] API_BASE_URL 不是有效的 URL: "${trimmedUrl}"，使用默认值: ${DEFAULT_BACKEND_URL}`
+    );
+    return DEFAULT_BACKEND_URL;
+  }
+
+  console.log(`[next.config] 使用 backendUrl: ${trimmedUrl}`);
+  return trimmedUrl;
+})();
 const nextConfig: NextConfig = {
   transpilePackages: ["@autix/contracts"],
   output: "standalone",
