@@ -4,11 +4,13 @@ export const USERS = {
   alice: {
     name: "Alice",
     token:
+      process.env.NEXT_PUBLIC_DEMO_ALICE_TOKEN ??
       "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOiJ1c2VyLTAwMSIsImlhdCI6MTc4MTg2NDM5MywiZXhwIjoxODEzNDAwMzkzfQ.etoW-VgwcnfEPPOcBTxxTrRSHWfyEaSArrdCyqNGIns",
   },
   bob: {
     name: "Bob",
     token:
+      process.env.NEXT_PUBLIC_DEMO_BOB_TOKEN ??
       "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOiJ1c2VyLTAwMiIsImlhdCI6MTc4MTg2NDM5MywiZXhwIjoxODEzNDAwMzkzfQ.81bNean8CFDSh19FbauV-AnkHS0u1ZxHGRbaWuBOaX8",
   },
 } as const;
