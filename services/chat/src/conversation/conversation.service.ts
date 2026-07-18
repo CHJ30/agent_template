@@ -42,6 +42,12 @@ export class ConversationService {
           : messages.length > 0
             ? 'ready'
             : 'idle',
+        // Lets the client detect a newly finished background answer even when
+        // a short run starts and finishes between two sidebar polls.
+        answerVersion: (rawStatus === 'completed' || rawStatus === 'pending_hitl') &&
+          typeof metadata?.finishedAt === 'string'
+          ? metadata.finishedAt
+          : null,
       };
     });
   }

@@ -1,5 +1,5 @@
 "use client";
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -9,7 +9,10 @@ export interface Conversation {
   createdAt: string;
   updatedAt: string;
   runStatus?: "idle" | "running" | "ready";
+  answerVersion?: string | null;
 }
+
+type AnswerNotification = Pick<Conversation, "id" | "title">;
 
 interface Props {
   token: string;
@@ -53,17 +56,46 @@ export function ConversationSidebar({ token, activeId, onSelect, onCreated, onDe
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [notifications, setNotifications] = useState<AnswerNotification[]>([]);
+  const answerVersionsRef = useRef<Map<string, string | null> | null>(null);
 
   const refresh = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      setConversations(await apiListConversations(token));
+      const next = await apiListConversations(token);
+      const previousVersions = answerVersionsRef.current;
+      if (previousVersions) {
+        const completed = next.filter((conversation) => {
+          const previous = previousVersions.get(conversation.id) ?? null;
+          return conversation.id !== activeId &&
+            Boolean(conversation.answerVersion) &&
+            conversation.answerVersion !== previous;
+        });
+        if (completed.length > 0) {
+          setNotifications((current) => {
+            const byId = new Map(current.map((notification) => [notification.id, notification]));
+            for (const conversation of completed) {
+              byId.set(conversation.id, { id: conversation.id, title: conversation.title });
+            }
+            return [...byId.values()];
+          });
+        }
+      }
+      answerVersionsRef.current = new Map(
+        next.map((conversation) => [conversation.id, conversation.answerVersion ?? null]),
+      );
+      setConversations(next);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
     }
+  }, [activeId, token]);
+
+  useEffect(() => {
+    answerVersionsRef.current = null;
+    setNotifications([]);
   }, [token]);
 
   // Reload whenever the logged-in user (token) changes.
@@ -98,7 +130,14 @@ export function ConversationSidebar({ token, activeId, onSelect, onCreated, onDe
     }
   }
 
+  function openNotification(notification: AnswerNotification) {
+    const conversation = conversations.find((item) => item.id === notification.id);
+    setNotifications((current) => current.filter((item) => item.id !== notification.id));
+    if (conversation) onSelect(conversation);
+  }
+
   return (
+    <>
     <aside className="flex w-60 shrink-0 flex-col border-r border-gray-200 bg-white">
       <div className="border-b border-gray-100 px-3 py-3">
         <button
@@ -150,5 +189,26 @@ export function ConversationSidebar({ token, activeId, onSelect, onCreated, onDe
         ))}
       </div>
     </aside>
+    <div className="fixed right-5 top-5 z-50 flex w-80 flex-col gap-2" aria-live="polite">
+      {notifications.map((notification) => (
+        <button
+          key={notification.id}
+          type="button"
+          onClick={() => openNotification(notification)}
+          className="rounded-xl border border-emerald-200 bg-white p-4 text-left shadow-lg transition hover:border-emerald-300 hover:shadow-xl"
+        >
+          <span className="flex items-start gap-3">
+            <span className="mt-1 h-2.5 w-2.5 shrink-0 rounded-full bg-green-500" />
+            <span className="min-w-0">
+              <span className="block truncate text-sm font-semibold text-gray-800">
+                {notification.title} 有新回答
+              </span>
+              <span className="mt-1 block text-xs text-gray-500">点击查看会话</span>
+            </span>
+          </span>
+        </button>
+      ))}
+    </div>
+    </>
   );
 }
