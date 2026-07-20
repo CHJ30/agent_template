@@ -1,0 +1,29 @@
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "autix-ragas-evaluator"
+version = "0.1.0"
+description = "CI-only RAGAS HTTP adapter for the Autix legal RAG system"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi==0.139.2",
+  "uvicorn==0.51.0",
+]
+
+[project.optional-dependencies]
+real = [
+  "openai==2.46.0",
+  "ragas==0.4.3",
+]
+test = [
+  "httpx==0.28.1",
+  "pytest==9.1.1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["ragas_evaluator"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

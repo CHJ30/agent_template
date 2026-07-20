@@ -8,6 +8,7 @@
 		"start": "NODE_ENV=production bun run dist/src/main.js",
 		"typecheck": "tsc --noEmit",
 		"lint": "tsc --noEmit",
+		"rag:evaluate:bootstrap": "RAG_EVAL_BOOTSTRAP_MODE=true RAGAS_MOCK=true bun run scripts/run-rag-evaluation.ts",
 		"db:generate": "prisma generate",
 		"db:migrate": "prisma migrate dev --name init",
 		"db:studio": "prisma studio"
