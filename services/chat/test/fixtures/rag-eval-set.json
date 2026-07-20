@@ -1,0 +1,46 @@
+[
+  {
+    "id": "bootstrap-civil-001",
+    "category": "合同责任",
+    "riskLevel": "low",
+    "question": "合同一方不履行合同义务时，通常应承担什么责任？",
+    "expectedDocIds": ["civil-code-bootstrap"],
+    "groundTruth": "当事人一方不履行合同义务或者履行合同义务不符合约定的，应依法承担继续履行、采取补救措施或者赔偿损失等违约责任。",
+    "bootstrap": {
+      "answer": "应依法承担继续履行、采取补救措施或者赔偿损失等违约责任。",
+      "contexts": [
+        "演示上下文：当事人一方不履行合同义务或者履行合同义务不符合约定的，应承担继续履行、采取补救措施或者赔偿损失等违约责任。"
+      ],
+      "retrievedDocIds": ["civil-code-bootstrap"]
+    }
+  },
+  {
+    "id": "bootstrap-civil-002",
+    "category": "民事权利",
+    "riskLevel": "low",
+    "question": "自然人的民事权利能力从什么时候开始？",
+    "expectedDocIds": ["civil-code-bootstrap"],
+    "groundTruth": "自然人的民事权利能力始于出生，终于死亡。",
+    "bootstrap": {
+      "answer": "自然人的民事权利能力始于出生，终于死亡。",
+      "contexts": [
+        "演示上下文：自然人从出生时起到死亡时止，具有民事权利能力，依法享有民事权利，承担民事义务。"
+      ],
+      "retrievedDocIds": ["civil-code-bootstrap"]
+    }
+  },
+  {
+    "id": "bootstrap-out-of-scope-001",
+    "category": "知识边界",
+    "riskLevel": "low",
+    "question": "请根据当前知识库说明某个虚构国家最新的公司税率。",
+    "expectedDocIds": [],
+    "groundTruth": "当前法律知识库没有足够资料，应明确说明无法回答。",
+    "bootstrap": {
+      "answer": "当前法律知识库资料不足，无法回答该问题。",
+      "contexts": [],
+      "retrievedDocIds": []
+    }
+  }
+]
+

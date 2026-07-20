@@ -1,0 +1,11 @@
+{
+  "recallAtK": 0,
+  "mrr": 0,
+  "ndcgAtK": 0,
+  "faithfulness": 0,
+  "answer_relevancy": 0,
+  "context_precision": 0,
+  "context_recall": 0,
+  "highRiskPassRate": 0
+}
+
